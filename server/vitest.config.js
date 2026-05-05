@@ -1,6 +1,17 @@
-// Configurație Vitest pentru backend.
+// Configurație Vitest pentru backend (UNIT tests).
 // Folosim CommonJS (module.exports) ca să fie consistent cu restul codului server.
 // Vitest acceptă config în CJS (e încărcat de Vite via require fallback).
+//
+// Include glob: DOAR `src/**/*.test.js`. Integration tests din `tests/integration/**`
+// au propriul config (`vitest.integration.config.js`) cu `singleFork: true` și
+// `fileParallelism: false` — rulează SECVENȚIAL pentru că share-uiesc o singură
+// DB Postgres reală (race condition observat pe main: auth.integration creează
+// schema `amef_shared` în paralel cu clients.integration care o face DROP →
+// „relation does not exist" intermitent). Vezi `vitest.integration.config.js`.
+//
+// Ca rezultat, `vitest run` (default) rulează unit tests în paralel (fast),
+// iar `vitest run --config vitest.integration.config.js` rulează integration
+// secvențial. CI orchestrează ambele apeluri.
 
 module.exports = {
   test: {
@@ -9,7 +20,7 @@ module.exports = {
     // `require('vitest')` în fișierele .test.js — Vitest 2.x este pur ESM și nu poate fi
     // importat via require dintr-un modul CJS. Codul aplicației rămâne CommonJS curat.
     globals: true,
-    include: ['src/**/*.test.js', 'tests/**/*.test.js'],
+    include: ['src/**/*.test.js'],
     exclude: ['node_modules/**', 'dist/**', 'coverage/**'],
     coverage: {
       provider: 'v8',

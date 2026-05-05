@@ -14,7 +14,7 @@
     "test:run": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:integration": "vitest run tests/integration",
+    "test:integration": "vitest run --config vitest.integration.config.js",
     "lint": "echo \"server lint: skipped (no eslint config yet — added in later stage)\"",
     "lint:fix": "echo \"server lint:fix: skipped (no eslint config yet)\"",
     "migrate:shared": "node src/db/migrate-cli.js shared",
