@@ -70,10 +70,11 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
   }
 
   beforeAll(async () => {
-    pool = new Pool({ connectionString: TEST_DB, max: 4 });
-    pool.on('connect', (client) => {
-      client.query('SET search_path TO amef_shared, public').catch(() => {});
-    });
+    const url = new URL(TEST_DB);
+    // Search_path setat in connection string -> aplicat de Postgres INAINTE de
+    // orice query, eliminand race condition-ul cu SET asincron din on('connect').
+    url.searchParams.set('options', '-c search_path=amef_shared,public');
+    pool = new Pool({ connectionString: url.toString(), max: 4 });
   });
 
   afterAll(async () => {

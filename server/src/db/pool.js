@@ -8,8 +8,11 @@
 //
 // `search_path` e setat explicit la `amef`/`amef_shared` ca să forțăm
 // folosirea schemei dedicate (NU `public` — regulă din CLAUDE.md). Setarea
-// se face în handler-ul `connect` pentru ca fiecare conexiune nouă creată
-// de pool să aibă search_path corect înainte de prima query.
+// se face prin parametrul `options=-c search_path=...` din connection string —
+// Postgres îl aplică ATOMIC, înainte de orice query, garantat de protocol.
+// Alternativa cu `pool.on('connect', SET search_path)` rulează asincron și
+// fără await; deși benignă în condiții normale, poate eșua în edge cases
+// (retries de conexiune, timeouts), iar fix-ul e simplu: îl mutăm în URL.
 //
 // `_deps` e un test seam — în CJS vi.mock NU interceptează require(), deci
 // folosim injecție explicită pentru Pool/getSecret/logger ca testele să
@@ -46,6 +49,15 @@ function buildTenantSecretName(tenantSlug) {
   return `tenant-${tenantSlug}-db-connection`;
 }
 
+// Adaugă `?options=-c search_path=<schema>,public` la connection string.
+// Postgres aplică `options` la handshake — orice query pe conexiunea respectivă
+// vede deja search_path-ul corect, fără SET asincron post-connect.
+function withSearchPath(connectionString, schema) {
+  const url = new URL(connectionString);
+  url.searchParams.set('options', `-c search_path=${schema},public`);
+  return url.toString();
+}
+
 async function getTenantPool(tenantSlug) {
   if (typeof tenantSlug !== 'string' || tenantSlug.trim() === '') {
     throw new Error('tenantSlug trebuie să fie un string non-gol');
@@ -54,24 +66,13 @@ async function getTenantPool(tenantSlug) {
   if (cached) {
     return cached;
   }
-  const connectionString = await _deps.getSecret(
+  const rawConnectionString = await _deps.getSecret(
     buildTenantSecretName(tenantSlug)
   );
   const pool = new _deps.PoolClass({
-    connectionString,
+    connectionString: withSearchPath(rawConnectionString, 'amef'),
     max: TENANT_POOL_MAX,
     idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS,
-  });
-  // Atenție: handler-ul 'connect' nu e await-uit de pg-pool, dar query-urile
-  // pe aceeași conexiune sunt serializate de protocolul Postgres — SET-ul
-  // se execută înainte de primul SELECT al user-ului.
-  pool.on('connect', (client) => {
-    client.query('SET search_path TO amef, public').catch((err) => {
-      _deps.logger.error(
-        { err, tenantSlug },
-        'Eșec la setarea search_path pe conexiune tenant'
-      );
-    });
   });
   tenantPools.set(tenantSlug, pool);
   return pool;
@@ -81,21 +82,13 @@ async function getSharedPool() {
   if (sharedPool) {
     return sharedPool;
   }
-  const connectionString = await _deps.getSecret(
+  const rawConnectionString = await _deps.getSecret(
     config.SHARED_DB_CONNECTION_SECRET_NAME
   );
   sharedPool = new _deps.PoolClass({
-    connectionString,
+    connectionString: withSearchPath(rawConnectionString, 'amef_shared'),
     max: SHARED_POOL_MAX,
     idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS,
-  });
-  sharedPool.on('connect', (client) => {
-    client.query('SET search_path TO amef_shared, public').catch((err) => {
-      _deps.logger.error(
-        { err },
-        'Eșec la setarea search_path pe conexiune shared'
-      );
-    });
   });
   return sharedPool;
 }

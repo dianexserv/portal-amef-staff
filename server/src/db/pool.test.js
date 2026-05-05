@@ -107,35 +107,21 @@ describe('getTenantPool', () => {
     const p = await pool.getTenantPool('dianex');
     expect(p.__opts.max).toBe(10);
     expect(p.__opts.idleTimeoutMillis).toBe(30000);
-    expect(p.__opts.connectionString).toBe(
-      'postgresql://u:p@127.0.0.1:5432/db'
-    );
   });
 
-  it('înregistrează handler "connect" și setează search_path la amef, public', async () => {
+  it('injectează search_path=amef,public în connection string (param `options`)', async () => {
     const p = await pool.getTenantPool('dianex');
-    expect(p.on).toHaveBeenCalledWith('connect', expect.any(Function));
-    const fakeClient = { query: vi.fn().mockResolvedValue() };
-    p.__triggerConnect(fakeClient);
-    expect(fakeClient.query).toHaveBeenCalledWith(
-      'SET search_path TO amef, public'
-    );
+    const url = new URL(p.__opts.connectionString);
+    expect(url.searchParams.get('options')).toBe('-c search_path=amef,public');
+    // Părțile de bază ale URL-ului rămân intacte
+    expect(url.hostname).toBe('127.0.0.1');
+    expect(url.port).toBe('5432');
+    expect(url.pathname).toBe('/db');
   });
 
-  it('handler "connect" prinde erorile de la SET search_path', async () => {
+  it('NU înregistrează handler "connect" pe tenant pool (search_path e în URL)', async () => {
     const p = await pool.getTenantPool('dianex');
-    const fakeClient = {
-      query: vi.fn().mockRejectedValue(new Error('boom')),
-    };
-    p.__triggerConnect(fakeClient);
-    // Lăsăm microtask-ul .catch să se execute
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(fakeClient.query).toHaveBeenCalled();
-    expect(pool._deps.logger.error).toHaveBeenCalledWith(
-      expect.objectContaining({ tenantSlug: 'dianex' }),
-      expect.stringContaining('search_path')
-    );
+    expect(p.on).not.toHaveBeenCalled();
   });
 
   it('respinge tenantSlug gol sau invalid', async () => {
@@ -172,26 +158,17 @@ describe('getSharedPool', () => {
     expect(p.__opts.idleTimeoutMillis).toBe(30000);
   });
 
-  it('înregistrează handler "connect" și setează search_path la amef_shared, public', async () => {
+  it('injectează search_path=amef_shared,public în connection string (param `options`)', async () => {
     const p = await pool.getSharedPool();
-    expect(p.on).toHaveBeenCalledWith('connect', expect.any(Function));
-    const fakeClient = { query: vi.fn().mockResolvedValue() };
-    p.__triggerConnect(fakeClient);
-    expect(fakeClient.query).toHaveBeenCalledWith(
-      'SET search_path TO amef_shared, public'
+    const url = new URL(p.__opts.connectionString);
+    expect(url.searchParams.get('options')).toBe(
+      '-c search_path=amef_shared,public'
     );
   });
 
-  it('handler "connect" prinde erorile pe shared pool', async () => {
+  it('NU înregistrează handler "connect" pe shared pool (search_path e în URL)', async () => {
     const p = await pool.getSharedPool();
-    const fakeClient = {
-      query: vi.fn().mockRejectedValue(new Error('boom-shared')),
-    };
-    p.__triggerConnect(fakeClient);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(fakeClient.query).toHaveBeenCalled();
-    expect(pool._deps.logger.error).toHaveBeenCalled();
+    expect(p.on).not.toHaveBeenCalled();
   });
 });
 
