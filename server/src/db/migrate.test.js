@@ -164,12 +164,13 @@ describe('applyMigrations — happy path', () => {
     expect(result.applied).toEqual(['001_a.sql', '002_b.sql']);
     expect(result.skipped).toEqual([]);
 
-    // Verificăm secvența esențială: CREATE SCHEMA, CREATE TABLE schema_migrations,
-    // pg_advisory_lock, BEGIN, SQL, INSERT, COMMIT (de două ori), unlock.
+    // Secvența esențială (în această ordine): pg_advisory_lock, CREATE SCHEMA,
+    // CREATE TABLE schema_migrations, SELECT filename..., BEGIN, SQL, INSERT,
+    // COMMIT (× 2 migrații), pg_advisory_unlock.
     const sqls = client.calls.map((c) => c.sql);
+    expect(sqls.some((s) => s.includes('pg_advisory_lock'))).toBe(true);
     expect(sqls.some((s) => s.includes('CREATE SCHEMA IF NOT EXISTS "amef"'))).toBe(true);
     expect(sqls.some((s) => s.includes('"amef".schema_migrations'))).toBe(true);
-    expect(sqls.some((s) => s.includes('pg_advisory_lock'))).toBe(true);
     expect(sqls.filter((s) => s === 'BEGIN')).toHaveLength(2);
     expect(sqls.filter((s) => s === 'COMMIT')).toHaveLength(2);
     expect(sqls.some((s) => s.includes('pg_advisory_unlock'))).toBe(true);
@@ -389,7 +390,12 @@ describe('applyMigrations — error path', () => {
 });
 
 describe('applyMigrations — advisory lock', () => {
-  it('apelează pg_advisory_lock cu lock id-ul fix înainte de orice migrație', async () => {
+  it('apelează pg_advisory_lock ÎNAINTE de orice DDL și de orice migrație', async () => {
+    // Ordinea contează: `CREATE TABLE IF NOT EXISTS` din Postgres NU e atomic
+    // împotriva DDL-ului concurent — două instanțe care pornesc simultan pot
+    // amândouă trece IF NOT EXISTS și apoi una eșuează cu duplicate-key pe
+    // pg_type_typname_nsp_index. Lock-ul trebuie acquired înainte de
+    // bootstrap-ul schemei, nu doar înainte de tranzacții.
     migrate._deps.fs.readdirSync = vi.fn(() => ['001_a.sql']);
     migrate._deps.fs.readFileSync = vi.fn(() => 'SELECT 1;');
     const client = makeClient({ appliedSeed: [] });
@@ -397,13 +403,27 @@ describe('applyMigrations — advisory lock', () => {
 
     await applyMigrations(pool, '/migs', TEST_OPTS);
 
-    // Găsim indicele apelului de lock
     const lockIdx = client.calls.findIndex(
       (c) =>
         typeof c.sql === 'string' && c.sql.includes('pg_advisory_lock(')
     );
+    const createSchemaIdx = client.calls.findIndex(
+      (c) =>
+        typeof c.sql === 'string' &&
+        c.sql.includes('CREATE SCHEMA IF NOT EXISTS')
+    );
+    const createTableIdx = client.calls.findIndex(
+      (c) =>
+        typeof c.sql === 'string' &&
+        c.sql.includes('CREATE TABLE IF NOT EXISTS') &&
+        c.sql.includes('schema_migrations')
+    );
     const beginIdx = client.calls.findIndex((c) => c.sql === 'BEGIN');
+
     expect(lockIdx).toBeGreaterThanOrEqual(0);
+    // Lock-ul vine înainte de TOATE: CREATE SCHEMA, CREATE TABLE, BEGIN.
+    expect(createSchemaIdx).toBeGreaterThan(lockIdx);
+    expect(createTableIdx).toBeGreaterThan(lockIdx);
     expect(beginIdx).toBeGreaterThan(lockIdx);
 
     // Verifică param-ul = MIGRATION_ADVISORY_LOCK_ID
