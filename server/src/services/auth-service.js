@@ -1,10 +1,17 @@
 // Serviciu de autentificare. Două lumi de verificat: identitatea de la
 // Firebase (Google SSO) și sesiunea proprie (JWT semnat de noi).
 //
-// Decizie D6 (MVP): Google SSO ONLY. 2FA delegat lui Google (Dianex are
-// YubiKey + cont Google cu 2FA). Refuzăm login dacă claim-ul de second
-// factor lipsește. Email/parolă și Microsoft SSO se adaugă când avem
-// nevoie de un tenant non-Google-Workspace.
+// Decizie D6 (MVP, revizuită): Google SSO ONLY via Firebase. 2FA e
+// responsabilitatea TENANT-ului — `tenant_admin`-ul forțează 2FA prin
+// Google Workspace policy (admin.google.com → Security → 2-Step Verification
+// → Enforce). Backend-ul NU face o verificare Firebase MFA suplimentară
+// (claim `firebase.sign_in_second_factor`): Google a validat deja factorul
+// înainte de a emite ID token-ul, iar Firebase MFA peste asta ar fi
+// redundant și un feature plătit (Identity Platform). E pattern-ul standard
+// SaaS B2B 2026 (Salesforce / Asana / Linear).
+//
+// Email/parolă și Microsoft SSO se adaugă când avem nevoie de un tenant
+// non-Google-Workspace.
 //
 // `_deps` (vezi „Testing seam pattern" în CLAUDE.md) injectează firebase
 // admin, getSecret, pool și logger — testele rescriu intrările.
@@ -51,32 +58,12 @@ const _deps = {
   logger: realLogger,
 };
 
-function hasMfa(decoded) {
-  // Două surse posibile, ambele acceptate:
-  //   - `firebase.sign_in_second_factor` — set de Firebase când e enrollat
-  //     un al doilea factor în Firebase Identity Platform (TOTP).
-  //   - `mfa_verified === true` — claim custom pe care l-am putea seta via
-  //     Cloud Function pe baza Google sign-in atributes (când 2FA e pe
-  //     contul Google, nu în Firebase).
-  // Pentru MVP cerem cel puțin una — Dianex are 2FA pe Google, deci în
-  // practică va fi `mfa_verified` (după ce wire-uim Cloud Function-ul) sau
-  // 2FA enrollat direct în Firebase pentru cei fără Workspace.
-  if (!decoded || typeof decoded !== 'object') return false;
-  if (decoded.mfa_verified === true) return true;
-  if (
-    decoded.firebase &&
-    typeof decoded.firebase === 'object' &&
-    decoded.firebase.sign_in_second_factor
-  ) {
-    return true;
-  }
-  return false;
-}
-
+// Acceptăm orice token Firebase valid emis prin Google provider. 2FA e
+// gestionat de Google (delegat). Tenant_admin-ul e responsabil să forțeze
+// 2FA prin Google Workspace policy.
 async function validateFirebaseToken(idToken) {
-  let decoded;
   try {
-    decoded = await _deps.verifyIdToken(idToken);
+    return await _deps.verifyIdToken(idToken);
   } catch (err) {
     // Wrap cu UnauthorizedError ca middleware-ul de erori să răspundă 401,
     // nu 500. Mesajul brut din firebase ajută la triage local; în prod nu
@@ -86,12 +73,6 @@ async function validateFirebaseToken(idToken) {
       `Token Firebase invalid: ${err && err.message ? err.message : 'verificare eșuată'}`
     );
   }
-  if (!hasMfa(decoded)) {
-    throw new ForbiddenError(
-      '2FA obligatoriu pe contul Google. Activează-l și reîncearcă.'
-    );
-  }
-  return decoded;
 }
 
 async function emitJwt({ firebaseUid, email, tenantSlug, role, tenantId }) {

@@ -84,25 +84,18 @@ describe('default _deps.verifyIdToken (lazy Firebase init)', () => {
 });
 
 describe('validateFirebaseToken', () => {
-  it('token valid cu mfa via firebase.sign_in_second_factor → returnează decoded', async () => {
+  // D6 (revizuit): NU mai cerem un claim de second factor — Google validează
+  // 2FA înainte de a emite token-ul, iar tenant_admin-ul forțează 2FA prin
+  // Google Workspace policy. Backend-ul acceptă orice token Firebase valid.
+  it('token valid → returnează decoded (fără verificare MFA suplimentară)', async () => {
     authService._deps.verifyIdToken.mockResolvedValue({
       uid: 'fb-1',
       email: 'a@b.ro',
-      firebase: { sign_in_second_factor: 'totp' },
+      firebase: { sign_in_provider: 'google.com' },
     });
     const decoded = await authService.validateFirebaseToken('idtoken');
     expect(decoded.uid).toBe('fb-1');
     expect(authService._deps.verifyIdToken).toHaveBeenCalledWith('idtoken');
-  });
-
-  it('token valid cu mfa via custom claim mfa_verified → acceptat', async () => {
-    authService._deps.verifyIdToken.mockResolvedValue({
-      uid: 'fb-1',
-      email: 'a@b.ro',
-      mfa_verified: true,
-    });
-    const decoded = await authService.validateFirebaseToken('idtoken');
-    expect(decoded.uid).toBe('fb-1');
   });
 
   it('token invalid → UnauthorizedError', async () => {
@@ -117,38 +110,11 @@ describe('validateFirebaseToken', () => {
     ).rejects.toThrow(/Token Firebase invalid/);
   });
 
-  it('token fără mfa → ForbiddenError cu mesaj despre 2FA', async () => {
-    authService._deps.verifyIdToken.mockResolvedValue({
-      uid: 'fb-1',
-      email: 'a@b.ro',
-      firebase: { sign_in_provider: 'google.com' },
-    });
+  it('token Firebase fără mesaj de eroare → fallback "verificare eșuată"', async () => {
+    authService._deps.verifyIdToken.mockRejectedValue(new Error());
     await expect(
       authService.validateFirebaseToken('idtoken')
-    ).rejects.toBeInstanceOf(ForbiddenError);
-    await expect(
-      authService.validateFirebaseToken('idtoken')
-    ).rejects.toThrow(/2FA obligatoriu/);
-  });
-
-  it('token fără claim firebase deloc → ForbiddenError', async () => {
-    authService._deps.verifyIdToken.mockResolvedValue({
-      uid: 'fb-1',
-      email: 'a@b.ro',
-    });
-    await expect(
-      authService.validateFirebaseToken('idtoken')
-    ).rejects.toBeInstanceOf(ForbiddenError);
-  });
-
-  it('token cu mfa_verified=false → ForbiddenError', async () => {
-    authService._deps.verifyIdToken.mockResolvedValue({
-      uid: 'fb-1',
-      mfa_verified: false,
-    });
-    await expect(
-      authService.validateFirebaseToken('idtoken')
-    ).rejects.toBeInstanceOf(ForbiddenError);
+    ).rejects.toThrow(/verificare eșuată/);
   });
 });
 
