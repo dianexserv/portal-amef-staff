@@ -8,6 +8,7 @@ const {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  ServiceUnavailableError,
 } = require('./index');
 
 describe('clase de eroare — proprietăți comune', () => {
@@ -18,6 +19,7 @@ describe('clase de eroare — proprietăți comune', () => {
       new ForbiddenError('x'),
       new NotFoundError('x'),
       new ConflictError('x'),
+      new ServiceUnavailableError('x'),
     ];
     for (const err of cases) {
       expect(err).toBeInstanceOf(Error);
@@ -101,5 +103,20 @@ describe('ConflictError', () => {
   it('details pot fi orice tip serializabil JSON', () => {
     const err = new ConflictError('conflict', { existingId: 7 });
     expect(err.details).toEqual({ existingId: 7 });
+  });
+});
+
+describe('ServiceUnavailableError', () => {
+  it('statusCode=503, code=SERVICE_UNAVAILABLE (default)', () => {
+    const err = new ServiceUnavailableError('ANAF e jos');
+    expect(err.statusCode).toBe(503);
+    expect(err.code).toBe('SERVICE_UNAVAILABLE');
+  });
+
+  it('cod custom setabil pe instanță (mutație post-construcție, ca în client-service)', () => {
+    const err = new ServiceUnavailableError('ANAF unavailable');
+    err.code = 'ANAF_UNAVAILABLE';
+    expect(err.code).toBe('ANAF_UNAVAILABLE');
+    expect(err.statusCode).toBe(503);
   });
 });
