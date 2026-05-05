@@ -62,6 +62,15 @@ const ConfigSchema = z.object({
   // Firebase Identity Platform — verificarea token-urilor SSO/2FA TOTP.
   FIREBASE_PROJECT_ID: requiredString('FIREBASE_PROJECT_ID'),
 
+  // Origin permis pentru CORS — frontend-ul Vite rulează default pe :5173.
+  // În staging/production setăm via .env la domeniul real (amef.dianex.ro).
+  // Folosim string simplu (nu listă) ca să rămână config plat; pentru mai
+  // multe origin-uri, schimbăm la un array în viitor.
+  CORS_ORIGIN: z.preprocess(
+    withDefault('http://localhost:5173'),
+    z.string().min(1)
+  ),
+
   // Numele secretelor DB nu mai trec prin env: sunt derivate prin convenție
   // din NODE_ENV + kind + slug în `utils/secret-naming.js`. O singură sursă
   // de adevăr previne drift-ul (ex: dev care setează un nume custom prin

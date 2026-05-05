@@ -38,6 +38,7 @@ describe('config (module-level export)', () => {
     expect(config.JWT_EXPIRY_HOURS).toBe(1);
     expect(config.REFRESH_TOKEN_EXPIRY_DAYS).toBe(7);
     expect(config.FIREBASE_PROJECT_ID).toBe('portal-amef-test');
+    expect(config.CORS_ORIGIN).toBe('http://localhost:5173');
   });
 
   it('exportă obiect înghețat (nu se poate modifica la runtime)', () => {
@@ -79,13 +80,14 @@ describe('config.loadConfig (factory)', () => {
       JWT_EXPIRY_HOURS: '',
       REFRESH_TOKEN_EXPIRY_DAYS: '',
       FIREBASE_PROJECT_ID: 'f',
-      SHARED_DB_CONNECTION_SECRET_NAME: 's',
+      CORS_ORIGIN: '',
     });
     expect(cfg.NODE_ENV).toBe('development');
     expect(cfg.PORT).toBe(3001);
     expect(cfg.LOG_LEVEL).toBe('info');
     expect(cfg.JWT_EXPIRY_HOURS).toBe(1);
     expect(cfg.REFRESH_TOKEN_EXPIRY_DAYS).toBe(7);
+    expect(cfg.CORS_ORIGIN).toBe('http://localhost:5173');
   });
 
   it('aplică default-urile și când câmpurile opționale lipsesc complet', () => {
@@ -93,13 +95,23 @@ describe('config.loadConfig (factory)', () => {
       GCP_PROJECT_ID: 'p',
       JWT_SECRET_NAME: 'j',
       FIREBASE_PROJECT_ID: 'f',
-      SHARED_DB_CONNECTION_SECRET_NAME: 's',
     });
     expect(cfg.NODE_ENV).toBe('development');
     expect(cfg.PORT).toBe(3001);
     expect(cfg.LOG_LEVEL).toBe('info');
     expect(cfg.JWT_EXPIRY_HOURS).toBe(1);
     expect(cfg.REFRESH_TOKEN_EXPIRY_DAYS).toBe(7);
+    expect(cfg.CORS_ORIGIN).toBe('http://localhost:5173');
+  });
+
+  it('CORS_ORIGIN poate fi suprascris (ex: domeniu de production)', () => {
+    const cfg = loadConfig({
+      GCP_PROJECT_ID: 'p',
+      JWT_SECRET_NAME: 'j',
+      FIREBASE_PROJECT_ID: 'f',
+      CORS_ORIGIN: 'https://amef.dianex.ro',
+    });
+    expect(cfg.CORS_ORIGIN).toBe('https://amef.dianex.ro');
   });
 
   it('aruncă eroare clară când GCP_PROJECT_ID lipsește', () => {
