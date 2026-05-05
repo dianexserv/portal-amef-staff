@@ -1,0 +1,9 @@
+{
+  "version": "1",
+  "name": "portal-amef-staff",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ]
+}

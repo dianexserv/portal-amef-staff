@@ -825,11 +825,11 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Sub-stage 5c — ANAF lookup service. `anaf-lookup-service.js` cu apel V9 webservice + retry exponențial (3 încercări) + cache in-memory cross-tenant 24h + fallback stale când ANAF e jos + Zod response validation cu `.passthrough()` peste tot. Helper-ul `judete-romania.js` extras separat (42 județe). `ServiceUnavailableError` adăugat în `errors/index.js`. 35 noi teste; coverage `anaf-lookup-service.js` 99.31/91.2/88.88/99.31, `judete-romania.js` 100%, `errors/index.js` rămâne 100%. Code complete, NOT committed.
+**Current stage:** Sub-stage 5d — Clients routes + Bruno + integration tests. 6 endpoint-uri (`GET /clients`, `GET /clients/:id`, `POST /clients`, `PUT /clients/:id`, `DELETE /clients/:id` admin-only, `POST /clients/lookup-by-cui`) + middleware `anaf-rate-limit` (30/oră/user) + 17 integration tests pe Postgres real (skip-uite local) + 6 Bruno requests + JWT claim `user_id` adăugat. Coverage `clients.js` 97.96/87.5/100/97.96, `anaf-rate-limit.js` 100%. Code complete, NOT committed.
 
-**Last completed stage:** Sub-stage 5b — Service layer Clienți (`client-service.js` 9 funcții + Zod + PG error mapping; 54 tests; merged pe main).
+**Last completed stage:** Sub-stage 5c — ANAF lookup service (`anaf-lookup-service.js` cu retry + cache 24h + stale fallback; `judete-romania.js` helper; 35 teste; merged pe main).
 
-**Next action:** Sub-stage 5d — Routes `/api/v1/clients/*` (CRUD + ANAF lookup endpoint) + integration tests + Bruno collection.
+**Next action:** Sub-stage 5e — Frontend modul Clienți (pagina listă, formular create/edit cu auto-completare ANAF la blur pe câmpul CUI, modal soft-delete restorable din UI doar pentru tenant_admin).
 
 ### Completed stages
 
@@ -840,8 +840,8 @@ When working on this codebase, NEVER do these things:
 - [~] Stage 5 — Clients module with ANAF auto-completion
   - [x] 5a — DB schema (migrations 001 + 002 applied to staging + production, merged pe main)
   - [x] 5b — Service layer (`client-service.js` 9 funcții + 3 scheme Zod + PG error mapping; 54 unit tests; merged pe main)
-  - [~] 5c — ANAF lookup service (`anaf-lookup-service.js` cu retry + cache 24h + stale fallback; `judete-romania.js` helper; 35 noi teste; code complete, NOT committed)
-  - [ ] 5d — Routes `/api/v1/clients` + integration tests + Bruno collection
+  - [x] 5c — ANAF lookup service (`anaf-lookup-service.js` cu retry + cache 24h + stale fallback; `judete-romania.js` helper; 35 teste; merged pe main)
+  - [~] 5d — Routes `/api/v1/clients` (6 endpoint-uri) + ANAF rate-limiter + integration tests + Bruno collection (code complete, NOT committed)
   - [ ] 5e — Frontend (listă + formular + auto-completare ANAF)
 - [ ] Stage 6 — Integration with erp-sync (with tests)
 - [ ] Stage 7 — Articles + Invoicing module (with full test suite)
@@ -941,6 +941,38 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
   inactiv / șters / neînregistrat în tenant_users). Restul flow-ului
   neschimbat — frontend continuă să afișeze 403 pentru cazurile reale de
   ForbiddenError (cont neautorizat).
+
+**Sub-stage 5d — Clients routes + Bruno + integration tests (2026-05-06, code complete, NOT committed):**
+- `server/src/routes/clients.js` (~250 linii) — 6 endpoint-uri sub `/api/v1/clients`:
+  - `GET /` — listare paginată (limit, offset, search, fiscalCodeType, anafVerified) + rolurile `tenant_admin`/`tenant_user`.
+  - `GET /:id` — detalii client; 404 dacă lipsește SAU e soft-deleted.
+  - `POST /` — creare via UI; service-ul (5b) face Zod-ul pe body, route-ul doar verifică shape obiect.
+  - `PUT /:id` — update parțial.
+  - `DELETE /:id` — soft-delete; **doar `tenant_admin`** (decizia 4b). Răspunde cu `{ id, deleted_at }`.
+  - `POST /lookup-by-cui` — auto-completare ANAF cu cache 24h + fallback stale; rate-limit 30/h/user prin `anafRateLimit`.
+- **Validare la nivel de rută** (Zod): `IdParamSchema` pentru path, `ListClientsQuerySchema` pentru query (cu `z.coerce` pentru limit/offset, preprocess explicit pentru `anafVerified` ca să distingă `'false'`/`'true'` strings de defaultul `true`-pe-orice-non-empty al `z.coerce.boolean()`), `LookupCuiBodySchema` pentru lookup-by-cui (`cui` ca string|integer, `referenceDate` regex YYYY-MM-DD). Body-ul POST/PUT NU e re-validat la rută — service-ul are deja schemele complete și aruncă `ZodError` care e formatat de error-handler-ul central. Route-ul doar verifică ca body-ul să fie obiect non-null, non-array (defensive — `Object.keys(undefined)` ar arunca în service).
+- **Mount în `app.js`**: `app.use('/api/v1/clients', clientsRouter)` — înainte de placeholder-ul `/api/v1` ca să prindă rutele specifice. authMiddleware aplicat pe ÎNTREGUL router (`router.use`), `requireRole(['tenant_admin'])` doar pe DELETE, `requireRole(['tenant_admin', 'tenant_user'])` pe rest.
+- **`server/src/middleware/anaf-rate-limit.js`** (~70 linii) — rate-limiter dedicat pentru `/lookup-by-cui`. 30 cereri/oră/user (NOT per IP — `keyGenerator` întoarce `${tenantSlug}:${firebaseUid}`). De ce dedicat: ANAF poate suspenda integrarea la volume mari, iar rate-limit-ul global pe `/api` e per-IP (un birou cu 5 useri ar împărți cota globală). Factory `buildAnafRateLimit({ max, windowMs })` exportat pentru testare cu fereastră scurtă (testele setează `max: 3` ca să atingă 429 în 4 cereri în loc de 31).
+- **JWT claim `user_id` adăugat** (modificare auth Stage 4): `auth-service.emitJwt` primește acum `userId` ca parametru și-l include în payload-ul JWT (`user_id` claim); `auth-middleware` îl populează pe `req.user.id`. Motivație: `POST /clients` trebuie să seteze `created_by_id = tenant_users.id` în DB; fără claim, ar fi nevoie de un DB hit per request pentru a-l extrage. Schimbarea e backward-compatible: tokenele vechi fără claim → `req.user.id` undefined → service aruncă natural când DB-ul respinge NULL pentru `created_by_id` (NOT NULL în schema).
+- **`tests/integration/clients.integration.test.js`** (~360 linii) — 17 integration tests pe Postgres real (CI service container; skip local fără `TEST_DB_CONNECTION_STRING`):
+  - Setup: `applyMigrations` pentru ambele dirs (shared + tenant) într-o singură DB Postgres; seed `amef_shared.tenants` + `amef_shared.tenant_users` cu un user de test cu id=1.
+  - Mocks: `clientService._deps.getTenantPool` override la pool-ul de test; `anafLookupService._deps.httpClient` mock-uit pe per-test (testele NU lovesc ANAF real); `clientsRouter._deps.authMiddleware` înlocuit cu un fake care populează `req.user` direct (auth-ul real e deja integration-tested în `auth.integration.test.js`, NU duplicăm).
+  - Cazuri: GET (3) — empty list, seeded clients, search filter; POST (4) — happy path, fiscal_code dup → 409, email dup → 409, phone+email lipsă → 400; GET/:id (2) — found, 404; PUT/:id (2) — partial update + DB reflectă, 404; DELETE/:id (3) — admin success, tenant_user → 403, deja șters → 404; lookup-by-cui (3) — happy mock, notFound mock, ANAF down → 503 (cu timeout mărit la 30s pentru retry-urile cu backoff).
+- **Bruno collection** la `bruno/portal-amef-staff/` (creată din 0):
+  - `bruno.json` — collection root.
+  - `environments/local.bru` (`baseUrl: http://localhost:3001`) și `staging.bru` (`baseUrl: https://amef-staging.dianex.ro`); ambele cu placeholder `authToken` pe care utilizatorul îl populează manual cu un JWT din `/firebase-login`.
+  - `clients/` — 6 fișiere `.bru`: `list-clients`, `get-client-by-id`, `create-client` (cu body realist complet), `update-client` (body parțial), `delete-client`, `lookup-by-cui`. Fiecare folosește `{{baseUrl}}` și `{{authToken}}` și are bloc `docs {}` cu detalii despre erorile posibile.
+- **Test counts**:
+  - `routes/clients.test.js` — 25 unit tests cu services mock-uite (5 GET list, 3 GET/:id, 5 POST, 3 PUT, 3 DELETE, 6 lookup).
+  - `middleware/anaf-rate-limit.test.js` — 8 unit tests (defaults + 7 scenarii de comportament inclusiv branch coverage pentru fallback IP).
+  - `tests/integration/clients.integration.test.js` — 17 integration tests (skip local).
+  - Net Stage 5d: 33 unit + 17 integration = 50 noi teste.
+  - Total server suite: 371 passed + 36 skipped (de la 369/19 înainte de 5d — net +2 unit pentru că am refactorizat anaf-rate-limit).
+- **Coverage**:
+  - `src/routes/clients.js`: 97.96% statements / 87.5% branches / 100% functions / 97.96% lines (ținta 70/60/70 — depășită). Liniile 232-237 neacoperite = bloc-ul de validare body shape pe PUT (acoperit de testul corespunzător din POST, dar PUT-ul are același cod duplicat — acceptabil pentru moment, candidat de DRY-up dacă apare un al treilea endpoint cu același pattern).
+  - `src/middleware/anaf-rate-limit.js`: 100% peste tot (ținta 100%).
+  - Toate celelalte module rămân la coverage anterior.
+- **Lecție**: claim-urile JWT trebuie privite ca un contract stabil. Adăugarea unui câmp nou (`user_id`) e backward-compatible (tokenele vechi îl văd ca undefined și flow-ul cade natural pe NOT NULL în DB), DAR redenumirea sau eliminarea unui câmp ar invalida sesiunile active. Pentru schimbări destructive ar trebui versionate (`v: 2` în payload) sau coordonate cu un cycle de invalidare în Identity Platform.
 
 **Sub-stage 5c — ANAF lookup service (2026-05-05, code complete, NOT committed):**
 - `server/src/services/anaf-lookup-service.js` (~330 linii) — wrapper peste ANAF V9 webservice (`POST https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva`). Pattern-uri replicate din implementarea Dianex (factura.js — în uz în producție): payload ARRAY de obiecte `[{ cui, data }]` (V9 e batch-capable, dar noi trimitem mereu 1 element), header `Content-Type: application/json`, timeout 15s. Diferențe față de Dianex: Pino logger în loc de log.factura, validare răspuns cu Zod, cache in-memory cu TTL 24h, erori prin AppError subclasses.

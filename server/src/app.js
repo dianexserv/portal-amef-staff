@@ -25,6 +25,7 @@ const config = require('./config');
 const logger = require('./logger');
 const healthRouter = require('./routes/health');
 const authRouter = require('./routes/auth');
+const clientsRouter = require('./routes/clients');
 const notFoundHandler = require('./middleware/not-found-handler');
 const errorHandler = require('./middleware/error-handler');
 
@@ -98,8 +99,9 @@ function createApp(options = {}) {
   //   - Rute viitoare (clients, invoices, etc.) vor folosi authMiddleware
   //     mai sus de mount, sau per-router.
   app.use('/api/v1/auth', authRouter);
+  app.use('/api/v1/clients', clientsRouter);
   // Placeholder router pentru restul /api/v1 — păstrează structura URL-ului
-  // stabilă; vine populat în Stage 5+.
+  // stabilă; vine populat în Stage 6+ (erp-sync) și Stage 7+ (articole, facturi).
   const apiV1 = express.Router();
   app.use('/api/v1', apiV1);
 

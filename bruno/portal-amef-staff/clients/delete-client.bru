@@ -1,0 +1,25 @@
+meta {
+  name: Delete client (soft)
+  type: http
+  seq: 5
+}
+
+delete {
+  url: {{baseUrl}}/api/v1/clients/1
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+docs {
+  Soft-delete (setează deleted_at = NOW()). Necesită rolul tenant_admin
+  (decizie 4b — ștergerea e ținută la rolul cu mai multă responsabilitate).
+
+  Erori posibile:
+    - 400 — id invalid
+    - 403 — user e tenant_user (nu tenant_admin)
+    - 404 — clientul nu există SAU e deja soft-deleted
+}

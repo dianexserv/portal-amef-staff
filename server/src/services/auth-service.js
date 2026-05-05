@@ -75,17 +75,29 @@ async function validateFirebaseToken(idToken) {
   }
 }
 
-async function emitJwt({ firebaseUid, email, tenantSlug, role, tenantId }) {
+async function emitJwt({
+  firebaseUid,
+  email,
+  tenantSlug,
+  role,
+  tenantId,
+  userId,
+}) {
   const secret = await _deps.getSecret(config.JWT_SECRET_NAME);
   // jti = identificator unic per token. Util pentru audit log + revoke list
   // (când / dacă o introducem). randomUUID e cripto-safe și stabil în Node.
   const jti = crypto.randomUUID();
+  // user_id = `amef_shared.tenant_users.id`. Inclus în claims din Stage 5d
+  // ca routes-urile să poată seta `created_by_id` în `core_clients` fără
+  // un round-trip la DB. Stabil per session (max 1h TTL); refresh-ul îl
+  // re-citește alături de role.
   const token = jwt.sign(
     {
       sub: firebaseUid,
       email,
       tenant_slug: tenantSlug,
       tenant_id: tenantId,
+      user_id: userId,
       role,
       type: 'access',
       jti,

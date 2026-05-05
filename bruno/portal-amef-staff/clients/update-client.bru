@@ -1,0 +1,32 @@
+meta {
+  name: Update client
+  type: http
+  seq: 4
+}
+
+put {
+  url: {{baseUrl}}/api/v1/clients/1
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+body:json {
+  {
+    "phone": "+40799999999",
+    "notes": "Updated via Bruno"
+  }
+}
+
+docs {
+  Update parțial — doar câmpurile prezente în body sunt scrise. fiscal_code_type
+  și fiscal_code NU pot fi modificate (sunt omise din UpdateClientSchema).
+
+  Erori posibile:
+    - 400 — id invalid sau Zod fail
+    - 404 — clientul nu există sau e soft-deleted
+    - 409 EMAIL_DUPLICATE — email-ul nou e deja folosit de alt client
+}

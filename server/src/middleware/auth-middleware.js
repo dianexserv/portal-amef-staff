@@ -46,6 +46,12 @@ async function authMiddleware(req, _res, next) {
       email: claims.email,
       tenantSlug: claims.tenant_slug,
       tenantId: claims.tenant_id,
+      // tenant_users.id — adăugat în claims în Stage 5d ca rutele să poată
+      // seta created_by_id fără un DB hit suplimentar. Tokenele vechi
+      // (emise înainte de upgrade) nu au claim-ul → `undefined`, iar
+      // request-ul va fi respins natural când service layer-ul cere
+      // un id valid (NOT NULL în DB).
+      id: claims.user_id,
       role: claims.role,
       jti: claims.jti,
     };

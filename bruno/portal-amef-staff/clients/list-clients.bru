@@ -1,0 +1,34 @@
+meta {
+  name: List clients
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/v1/clients?limit=20&offset=0
+  body: none
+  auth: bearer
+}
+
+params:query {
+  limit: 20
+  offset: 0
+  ~search: Dianex
+  ~fiscalCodeType: CUI
+  ~anafVerified: true
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+docs {
+  Listă paginată de clienți pentru tenantul autenticat (din JWT).
+
+  Query params (toate optionale):
+    - limit (1-100, default 20)
+    - offset (>=0, default 0)
+    - search — ILIKE pe company_name
+    - fiscalCodeType — 'CUI' sau 'CNP'
+    - anafVerified — 'true' sau 'false'
+}
