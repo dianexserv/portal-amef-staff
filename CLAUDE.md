@@ -825,11 +825,11 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Sub-stage 5a — DB schema for Clients module. Tenant migrations 001 (`core_representative_roles` + `core_clients` + seed) și 002 (forward fix: DROP NOT NULL pe representative_*, `anaf_data` JSONB, CHECK `phone_or_email_required`, GIN trigram pe `company_name`, înlocuire index `active`) aplicate cu succes pe **staging și production**. Schema finală validată via `\d amef.core_clients` pe ambele environments. Pending: PR + squash merge pe `main`, apoi sub-stage 5b.
+**Current stage:** Sub-stage 5b — Service layer Modulul Clienți. `client-service.js` cu 9 funcții publice (createClientFromUi/Import, getClientById, findClientByFiscalCode/Email, listClients, updateClient, softDeleteClient, restoreClient) + 3 scheme Zod compuse cu `.merge()` (CreateClientFromUi/Import + UpdateClient) + maparea PG → AppError pe constraint name (4 mappings + fallback). 54 unit tests, coverage `client-service.js` 99.63/96.92/100/99.63. Code complete, NOT committed.
 
-**Last completed stage:** Stage 4 — Auth (Part A backend + Part B frontend, merged on main).
+**Last completed stage:** Sub-stage 5a — DB schema (migrations 001 + 002 applied to staging + production, merged pe main).
 
-**Next action:** Open PR pentru `feat/stage-5-clients-anaf` (3 fișiere: 001 + 002 + CLAUDE.md), merge, apoi pornesc sub-stage 5b — Service layer pentru Clienți (`client-service.js` cu CRUD + Zod schema, `anaf-lookup-service.js` cu cache 24h și fallback).
+**Next action:** Sub-stage 5c — ANAF lookup service (`anaf-lookup-service.js` cu cache 24h în `core_clients.anaf_data` + fallback graceful + cron zilnic re-verificare).
 
 ### Completed stages
 
@@ -838,8 +838,8 @@ When working on this codebase, NEVER do these things:
 - [x] Stage 3 — Express app bootstrap (merged)
 - [x] Stage 4 — Login and Tenant Resolution (Part A backend + Part B frontend, merged)
 - [~] Stage 5 — Clients module with ANAF auto-completion
-  - [~] 5a — DB schema (migrations 001 + 002 applied to staging + production; pending PR/merge)
-  - [ ] 5b — Service layer (`client-service.js` CRUD + Zod schema)
+  - [x] 5a — DB schema (migrations 001 + 002 applied to staging + production, merged pe main)
+  - [~] 5b — Service layer (`client-service.js` 9 funcții + 3 scheme Zod + PG error mapping; 54 unit tests; code complete, NOT committed)
   - [ ] 5c — ANAF lookup service (`anaf-lookup-service.js` with 24h cache + fallback)
   - [ ] 5d — Routes `/api/v1/clients` + integration tests + Bruno collection
   - [ ] 5e — Frontend (listă + formular + auto-completare ANAF)
@@ -941,6 +941,50 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
   inactiv / șters / neînregistrat în tenant_users). Restul flow-ului
   neschimbat — frontend continuă să afișeze 403 pentru cazurile reale de
   ForbiddenError (cont neautorizat).
+
+**Sub-stage 5b — Service layer Modulul Clienți (2026-05-05, code complete, NOT committed):**
+- `server/src/services/client-service.js` (~480 linii) — 9 funcții publice:
+  - `createClientFromUi(tenantSlug, createdByUserId, data)` — validare strictă (representative_* required); INSERT; ConflictError pe duplicate fiscal_code/email.
+  - `createClientFromImport(tenantSlug, createdByUserId, data)` — validare relaxată (representative_* optional, .partial()); pentru migrarea Drive Stage 13.
+  - `getClientById(tenantSlug, id)` — `WHERE id = $1 AND deleted_at IS NULL`; NotFoundError dacă lipsește SAU e soft-deleted (UI nu trebuie să distingă).
+  - `findClientByFiscalCode(tenantSlug, fiscalCode)` / `findClientByEmail` — return row sau null (NU aruncă); folosit la duplicate-check înainte de creare în UI.
+  - `listClients(tenantSlug, { limit, offset, search, fiscalCodeType, anafVerified })` — paginare + 3 filtre opționale; WHERE construit dinamic cu placeholder-i `$1, $2, ...` count-ați incremental; ORDER BY created_at DESC (folosește `idx_core_clients_recent_active`); `search` face ILIKE `'%fragment%'` pe company_name (folosește GIN trigram); 2 query-uri (count + page) — `COUNT(*) OVER ()` ar dubla costul la limit=1000+.
+  - `updateClient(tenantSlug, id, data)` — partial update; SET dinamic doar pe câmpurile prezente în data + `updated_at = NOW()` literal; `WHERE id = $X AND deleted_at IS NULL`; NotFoundError dacă 0 rows; PG erori bubble-up via `runQuery`. No-op (data gol) → fall-through la getClientById.
+  - `softDeleteClient(tenantSlug, id)` — `SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`; mesajul include „nu există SAU e deja șters" (UI nu trebuie să le distingă).
+  - `restoreClient(tenantSlug, id)` — 2 query-uri: SELECT pentru a distinge 404 (id inexistent) vs 409 (deja activ); apoi UPDATE clear deleted_at. Nu folosesc un singur UPDATE deoarece `WHERE id = $1 AND deleted_at IS NOT NULL` cu 0 rows nu permite distincția între cele două cazuri.
+- **Compoziție scheme Zod cu `.merge()`** — single source of truth pentru fiecare câmp. Helpere ZodObject pure (mergeable), refines cross-field aplicate la nivel compus:
+  - `FiscalSchema` — fiscal_code_type enum + fiscal_code; refine custom (`refineFiscalCode`) verifică regex CUI `/^(RO\s?)?\d{2,10}$/i` SAU CNP `/^\d{13}$/` în funcție de tip.
+  - `CompanyAddressSchema` — county/city/street/street_number required + address_full/extra/postal_code optional.
+  - `ContactSchema` — phone + email ambele optional individual; refine `refinePhoneOrEmail` la composed level (cel puțin unul prezent).
+  - `RepresentativeFullSchema` (UI mode) vs `RepresentativePartialSchema = .partial()` (Import mode). Câmpurile auto-optional în UI: `representative_ci_series`, `representative_address_full`, `representative_address_extra`, `representative_postal_code` — ele rămân optional și în UI.
+  - `BankingSchema` — IBAN regex `/^RO\d{2}[A-Z]{4}\d{16}$/i` (case-insensitive).
+  - `AnafStatusSchema` — `is_vat_payer.default(false)`, `anaf_verified.default(false)`, `anaf_data: z.unknown()` (JSONB acceptă orice — validarea structurii vine în 5c când avem clientul ANAF).
+  - `CommonClientFields` — company_name + notes.
+  - Compoziție: `FiscalSchema.merge(...).merge(...).superRefine(refineFiscalCode).superRefine(refinePhoneOrEmail)` pentru Create. Pentru Update: same minus FiscalSchema (fiscal_code și fiscal_code_type nu sunt updateable) + `.partial()`. Refine-ul phone||email NU se aplică la Update — DB CHECK enforce-ează pe row-ul final.
+- **Maparea PG erori → AppError** — `mapPgError(err)` discriminează pe `err.code` SQLSTATE + `err.constraint`:
+
+| SQLSTATE | constraint | AppError | code custom |
+|----------|------------|----------|-------------|
+| 23505 | `fiscal_code_unique_active` | ConflictError | `FISCAL_CODE_DUPLICATE` |
+| 23505 | `idx_core_clients_email_unique_active` | ConflictError | `EMAIL_DUPLICATE` |
+| 23514 | `phone_or_email_required` | ValidationError | `PHONE_OR_EMAIL_REQUIRED` |
+| 23514 | `core_clients_fiscal_code_type_check` | ValidationError | `INVALID_FISCAL_CODE_TYPE` |
+| 23503 | `core_clients_representative_role_id_fkey` | ValidationError | `REPRESENTATIVE_ROLE_INVALID` |
+| altele | — | re-throw original | (cade pe INTERNAL_ERROR) |
+
+Codul custom (ex: `FISCAL_CODE_DUPLICATE`) e setat pe instanță via `setErrorCode(err, code)` (mutație post-construcție) — clasele din `errors/` au coduri default fixe; mutația permite codarea precisă fără a sparge contractul claselor existente. Helper-ul `runQuery(pool, sql, params)` wrap-uie pool.query și aruncă rezultatul lui mapPgError.
+- **`INSERT_COLUMNS`** — array constant cu 34 coloane setabile din service (toate non-managed). INSERT-ul folosește acest array ca single source of truth: `INSERT INTO ... (cols) VALUES ($1, ..., $N) RETURNING *`. Câmpurile lipsă din `data` devin NULL (mapate explicit în `values.map`). `is_vat_payer` și `anaf_verified` au `.default(false)` în Zod, deci după parse vor fi mereu boolean.
+- **Test seam `_deps`** — `_deps.getTenantPool` și `_deps.logger` injectabile pentru teste. Pool-ul mock în teste e `{ query: vi.fn() }` cu `mockResolvedValueOnce`/`mockRejectedValueOnce` per call (listClients și restoreClient fac 2 query-uri).
+- **54 unit tests** în `client-service.test.js`:
+  - `createClientFromUi` — 15 cazuri (3 success cu phone/email/ambele, 9 Zod rejections, 2 DB unique conflicts).
+  - `createClientFromImport` — 5 cazuri (3 success inclusiv full-blank representative, 2 Zod company_name/county still required).
+  - `getClientById` / `findClientByFiscalCode` / `findClientByEmail` — câte 3 cazuri (success + not found + soft-deleted; find-urile întorc null vs throw).
+  - `listClients` — 7 cazuri (default paginare, custom limit/offset, search, fiscalCodeType, anafVerified, combinație, empty).
+  - `updateClient` — 5 cazuri (partial single, multiple fields, NotFound, ConflictError pe email, ZodError pe email invalid).
+  - `softDeleteClient` / `restoreClient` — câte 3 cazuri (success + 2 căi de eroare; restoreClient distinge 404 vs 409).
+  - `_mapPgError` — 7 cazuri direct testing pentru ramurile rămase (23514 phone_or_email, 23514 fiscal_code_type, 23503 FK rep_role, unknown SQLSTATE re-throw, unknown constraint pe 23505/23514, null/undefined defensive).
+- **Coverage `client-service.js`:** 99.63% statements / 96.92% branches / 100% functions / 99.63% lines (ținta CLAUDE.md `src/services/**`: 80/70/80/80 — depășită cu margin). Liniile neacoperite (452-453) sunt fall-through-ul „no-op update" (data gol) — defensive, neexpus prin route-uri normale.
+- Total server suite: 295 passed + 19 skipped (de la 241 înainte de 5b — net +54 noi).
 
 **Sub-stage 5a — DB schema Modulul Clienți (2026-05-05, applied to staging + production, pending PR/merge):**
 - `migrations/tenant/001_init_tenant_schema.sql` — înlocuit placeholder Stage 2 (`CREATE SCHEMA amef`) cu schema reală: `core_representative_roles` (lookup cu 6 seed-uri: Administrator, Asociat unic, PFA - titular, ÎI - titular, Director General, Reprezentant împuternicit) + `core_clients` (37 coloane: identificare fiscală CUI/CNP, adresă companie completă, contact, reprezentant legal complet cu CI și adresă, banking, status ANAF, notes, audit). UNIQUE constraints: `(fiscal_code, deleted_at) NULLS NOT DISTINCT` (un fiscal_code activ unic per tenant). Partial unique index: `email WHERE email IS NOT NULL AND deleted_at IS NULL` — permite multipli clienți fără email să coexiste, dar enforce unicitate pe cei cu email (prep pentru login portal Client Faza B). Indexuri inițiale: btree pe `fiscal_code`, `email` (partial), `company_name` (btree simplu — corectat în 002), `(deleted_at) WHERE deleted_at IS NULL` (corectat în 002), `anaf_verified WHERE = false`. FK `representative_role_id → core_representative_roles(id)`.
