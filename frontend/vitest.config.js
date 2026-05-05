@@ -21,6 +21,10 @@ export default defineConfig({
       exclude: [
         'src/**/*.test.{js,jsx}',
         'src/main.jsx',
+        // `firebase.js` e doar un wrapper de inițializare care apelează
+        // `initializeApp` cu config din `import.meta.env`. Nu are logică de
+        // testat unitar; în testele consumatorilor mock-uim întregul modul.
+        'src/firebase.js',
       ],
       // Praguri din CLAUDE.md — aplicate doar fișierelor care match-uiesc glob-ul.
       thresholds: {
@@ -31,6 +35,24 @@ export default defineConfig({
           statements: 70,
         },
         'src/hooks/**': {
+          lines: 70,
+          functions: 70,
+          branches: 60,
+          statements: 70,
+        },
+        'src/pages/**': {
+          lines: 70,
+          functions: 70,
+          branches: 60,
+          statements: 70,
+        },
+        'src/contexts/**': {
+          lines: 70,
+          functions: 70,
+          branches: 60,
+          statements: 70,
+        },
+        'src/utils/**': {
           lines: 70,
           functions: 70,
           branches: 60,

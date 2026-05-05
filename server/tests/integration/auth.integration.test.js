@@ -156,23 +156,6 @@ skipIfNoDb('auth integration', () => {
       });
     });
 
-    it('Firebase token valid dar fără MFA → 403 cu mesaj despre 2FA', async () => {
-      await seedTenantAndUser();
-      authService._deps.verifyIdToken = vi.fn().mockResolvedValue({
-        uid: TEST_FIREBASE_UID,
-        email: TEST_EMAIL,
-        firebase: { sign_in_provider: 'google.com' }, // fără second factor
-      });
-      const res = await request(app)
-        .post('/api/v1/auth/firebase-login')
-        .send({ idToken: 'fake-no-mfa' });
-
-      expect(res.status).toBe(403);
-      expect(res.body.success).toBe(false);
-      expect(res.body.code).toBe('FORBIDDEN');
-      expect(res.body.error).toMatch(/2FA obligatoriu/);
-    });
-
     it('Firebase token invalid → 401', async () => {
       await seedTenantAndUser();
       authService._deps.verifyIdToken = vi

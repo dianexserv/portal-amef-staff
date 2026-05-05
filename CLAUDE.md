@@ -524,12 +524,19 @@ să poată ținti staging și de pe o mașină cu `NODE_ENV=production`.
 
 ## Auth flow (Stage 4)
 
-**Decizie D6 (MVP):** Google SSO ONLY via Firebase Identity Platform.
-Email/parolă și Microsoft SSO sunt amânate până când avem un tenant care nu
-e Google Workspace. 2FA e delegat lui Google (ex: Dianex folosește
-YubiKey/TOTP pe contul Google). Backend-ul REFUZĂ login dacă token-ul
-Firebase nu are claim de second factor (`firebase.sign_in_second_factor`
-sau custom claim `mfa_verified === true`) — răspuns 403 cu mesaj clar.
+**Decizie D6 (MVP, revizuită 2026-05-05):** Google SSO ONLY via Firebase
+Identity Platform. Email/parolă și Microsoft SSO sunt amânate până când
+avem un tenant care nu e Google Workspace.
+
+**2FA e responsabilitatea TENANT-ului**, enforcing-ul se face prin **Google
+Workspace policy** (admin.google.com → Security → 2-Step Verification →
+Enforce). Backend-ul NU verifică suplimentar claim-ul Firebase MFA —
+Google a validat deja factorul al doilea înainte de a emite ID token-ul, iar
+Firebase MFA peste asta ar duplica fără câștig real de securitate (în plus,
+Firebase MFA e feature plătit Identity Platform, iar UX-ul popup-ului dublu
+e net inferior). E pattern-ul standard SaaS B2B 2026 (Salesforce / Asana /
+Linear). Tenant_admin-ul e cel care trebuie să forțeze 2FA în Google
+Workspace — backend-ul îl ia ca dat.
 
 **Fluxul end-to-end:**
 1. Frontend: utilizatorul apasă „Login cu Google" → Firebase Web SDK
@@ -539,7 +546,8 @@ sau custom claim `mfa_verified === true`) — răspuns 403 cu mesaj clar.
 3. Frontend face `POST /api/v1/auth/firebase-login { idToken }`.
 4. Backend (`auth-service.validateFirebaseToken`):
    - Verifică `idToken` cu firebase-admin (semnătură + expirare).
-   - Verifică prezența claim-ului de 2FA — altfel 403.
+   - Acceptă orice token valid emis de Firebase prin Google provider.
+     2FA NU e verificat la nivel de backend (vezi D6 revizuit mai sus).
 5. Backend (`resolveTenantUser`): caută `firebase_uid` în
    `amef_shared.tenant_users JOIN amef_shared.tenants`. Dacă lipsește /
    `is_active = false` / `deleted_at` setat → 403.
@@ -562,6 +570,32 @@ sau custom claim `mfa_verified === true`) — răspuns 403 cu mesaj clar.
 - `POST /api/v1/auth/logout` — autentificat (audit-trail; MVP nu
   invalidează token-urile server-side, durata scurtă a access-token-ului
   limitează expunerea).
+
+**Frontend (Stage 4 Part B):**
+- `frontend/src/firebase.js` — inițializează Firebase Web SDK din
+  `import.meta.env.VITE_FIREBASE_*`. Provider Google cu
+  `setCustomParameters({ prompt: 'select_account' })` pentru ergonomie când
+  user-ul are mai multe conturi Google în browser.
+- `frontend/src/utils/api-client.js` — axios instance cu request interceptor
+  (Bearer header) și response interceptor (refresh-on-401 cu deduplicare
+  in-flight). Pe eșec de refresh: clear localStorage + redirect `/login`.
+  Storage keys: `amef.jwt`, `amef.refresh`, `amef.user`.
+- `frontend/src/contexts/AuthContext.jsx` — `<AuthProvider>` la root, expune
+  `useAuth()` cu `{ user, loading, isAuthenticated, login, logout }`. La
+  mount restaurează user-ul din localStorage; `login(idToken)` POST-ează la
+  backend și persistă tokens; `logout()` notifică backend (best-effort) +
+  signOut Firebase + clear local state.
+- `frontend/src/components/ProtectedRoute.jsx` — wrapper pentru rute
+  autenticate. `loading` → spinner; `!user` → `<Navigate to="/login" replace />`;
+  user prezent → randează children. Folosit în `App.jsx` pentru `/`.
+- `frontend/src/pages/LoginPage.jsx` — card centrat cu un singur buton
+  „Continuă cu Google" (signInWithPopup). Erorile sunt afișate în roșu;
+  mesajele specifice sunt extrase din `err.response.data.error` (axios) sau
+  `err.code` (Firebase: `auth/popup-closed-by-user`, `auth/popup-blocked`).
+  Auto-redirect la `/` dacă user-ul e deja autentificat la mount.
+- `frontend/src/pages/HomePage.jsx` — placeholder cu greeting + rol +
+  tenant_slug + buton Logout. Conținutul real (clienți, facturi) vine
+  începând cu Stage 5.
 
 ---
 
@@ -718,15 +752,15 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Stage 4 Part A — Backend auth (Firebase Google SSO + own JWT). Code & tests complete, pending review.
-**Last completed stage:** Stage 3 — Express app bootstrap (merged on main).
-**Next action:** Stage 4 Part B — Frontend (login page, Firebase Web SDK, refresh token storage, route guards).
+**Current stage:** Stage 4 Part B — Frontend auth (Google SSO popup + JWT storage + protected routes). Code & tests complete, pending review.
+**Last completed stage:** Stage 4 Part A — Backend auth (merged on main).
+**Next action:** Start Stage 5 — Modulul Clienți (CRUD + ANAF auto-completion).
 
 ### Completed stages
 - [x] Stage 1 — Setup project and structure (incl. testing infrastructure)
 - [x] Stage 2 — Setup databases and migration runner (with tests)
 - [x] Stage 3 — Express app bootstrap (merged)
-- [~] Stage 4 — Login and Tenant Resolution (Part A backend done; Part B frontend pending)
+- [~] Stage 4 — Login and Tenant Resolution (Part A backend merged; Part B frontend code complete, pending review)
 - [ ] Stage 5 — Clients module with ANAF auto-completion (with full test suite)
 - [ ] Stage 6 — Integration with erp-sync (with tests)
 - [ ] Stage 7 — Articles + Invoicing module (with full test suite)
@@ -743,8 +777,8 @@ When working on this codebase, NEVER do these things:
 > _Update after each test run._
 
 ```
-Last `pnpm test` run: 2026-05-05 (Stage 4 Part A complete) — server: 244 passed + 20 integration skipped
-  (no local Postgres), frontend: 0 (passWithNoTests)
+Last `pnpm test` run: 2026-05-05 (Stage 4 Part B complete) — server: 244 passed + 20 integration skipped
+  (no local Postgres), frontend: 48 passed
 Last `pnpm test:coverage` run: 2026-05-05 — server stats per file (stmt/branch/func/lines):
   - src/app.js:               100 / 100 / 100 / 100
   - src/config.js:            100 / 93.33 / 100 / 100
@@ -762,6 +796,14 @@ Last `pnpm test:coverage` run: 2026-05-05 — server stats per file (stmt/branch
   - src/utils/secret-manager.js:  100 / 100 / 100 / 100
   - src/utils/secret-naming.js:   100 / 100 / 100 / 100
   - src/db/migrate-cli.js + src/server.js: excluded from coverage (entry points)
+Frontend stats per file (stmt/branch/func/lines):
+  - src/App.jsx:                          100 / 100 / 100 / 100
+  - src/components/ProtectedRoute.jsx:    100 / 100 / 100 / 100
+  - src/contexts/AuthContext.jsx:         100 / 100 / 100 / 100
+  - src/pages/LoginPage.jsx:              100 / 89.47 / 100 / 100
+  - src/pages/HomePage.jsx:               100 / 100 / 100 / 100
+  - src/utils/api-client.js:              100 / 97.22 / 92.3 / 100
+  - src/firebase.js + src/main.jsx: excluded from coverage (entry / config-only modules)
 Integration tests against real Postgres run automatically in CI (postgres:18 service container).
 Locally, `pnpm test:integration` requires `TEST_DB_CONNECTION_STRING` to be set.
 ```
@@ -802,8 +844,37 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
 - `.gitkeep` pentru a păstra în git folderele goale ale structurii
 - `app.js`, `config.js`, `logger.js` apar la Stage 3 conform planului
 
+**Stage 4 follow-up: MFA verification relaxed (2026-05-05, NOT committed):**
+- Eliminat verificarea claim-ului `firebase.sign_in_second_factor` /
+  `mfa_verified` din `auth-service.validateFirebaseToken`. Motiv: a respins
+  userii Dianex legitimi care au 2FA pe contul Google (YubiKey) — token-ul
+  Firebase emis prin Google provider nu propagă claim-ul de second factor
+  decât dacă MFA e enrollat în Firebase Identity Platform (un feature plătit).
+- Decizie nouă: backend-ul are încredere în autentificarea Google. 2FA e
+  responsabilitatea tenant-ului — `tenant_admin`-ul forțează 2FA prin
+  Google Workspace admin policy. Documentat în D6 revizuit (vezi „Auth
+  flow"). Pattern standard SaaS B2B 2026 (Salesforce / Asana / Linear).
+- Cod: `validateFirebaseToken` returnează acum orice token valid emis de
+  firebase-admin; helper-ul `hasMfa` și `ForbiddenError`-ul aferent au fost
+  șterse. `ForbiddenError` rămâne folosit în `resolveTenantUser` (user
+  inactiv / șters / neînregistrat în tenant_users). Restul flow-ului
+  neschimbat — frontend continuă să afișeze 403 pentru cazurile reale de
+  ForbiddenError (cont neautorizat).
+
+**Stage 4 Part B — Frontend auth (Google SSO popup + JWT storage + protected routes) (2026-05-05, code complete, NOT committed):**
+- Dependențe noi (frontend): `firebase` (Web SDK v12), `react-router-dom` (v7), `axios` (v1). `pnpm install` rulează clean (un warning de build-script pentru `@firebase/util` — irrelevant pentru runtime).
+- `frontend/src/firebase.js` — initializeApp + getAuth + GoogleAuthProvider; toate config-urile vin din `import.meta.env.VITE_*` (Vite expune doar variabilele cu prefix VITE_ la browser, by design). `setCustomParameters({ prompt: 'select_account' })` ca user-ul să aleagă explicit contul. Modulul e exclus din coverage (wrapper de inițializare, fără logică de testat unitar — testele consumatorilor îl mock-uiesc complet).
+- `frontend/src/utils/api-client.js` — axios cu request interceptor (Bearer din `localStorage[amef.jwt]`) și response interceptor (refresh-on-401 cu deduplicare in-flight ca să nu lansăm 5 refresh-uri paralele când 5 cereri eșuează simultan). Test seam `_deps.redirect` ca să spy-uim redirect-ul în jsdom (`window.location.assign` e non-configurable). Storage keys: `amef.jwt`, `amef.refresh`, `amef.user`. 17 unit tests acoperă request/response interceptors, deduplicarea refresh-ului, eșecul de refresh (clear + redirect), wrapper-ele get/post/put/del.
+- `frontend/src/contexts/AuthContext.jsx` — `<AuthProvider>` cu state `{user, loading}`. `login(idToken)` apelează backend-ul prin api-client și persistă tokens; `logout()` e best-effort la backend (audit), apoi signOut Firebase + clear local. `useAuth()` aruncă dacă e folosit fără provider. Test seam `_deps.signOut` ca testele să nu atingă Firebase. 11 tests.
+- `frontend/src/components/ProtectedRoute.jsx` — gate pentru rute autenticate cu trei stări: spinner (loading=true), `<Navigate to="/login" replace />` (!user), children (user prezent). 3 tests.
+- `frontend/src/pages/LoginPage.jsx` — card Tailwind centrat, buton „Continuă cu Google" cu logo SVG inline. Erorile sunt clasificate: 403 cu mesaj backend (2FA / cont neautorizat), `auth/popup-closed-by-user`, `auth/popup-blocked`, fallback. State `signingIn` → buton disabled + text „Se conectează...". Auto-redirect `/` dacă user-ul e deja autentificat. 10 tests.
+- `frontend/src/pages/HomePage.jsx` — placeholder cu email + tenant + rol + buton Logout. 4 tests.
+- `frontend/src/App.jsx` — `<AuthProvider>` la root, `<Routes>` cu `/login` și `/` (protected), catch-all `*` → `/`. `BrowserRouter` rămâne în `main.jsx` ca testele să folosească `<MemoryRouter>` direct. 3 tests pentru routing (user neautentificat → redirect la login pe orice rută).
+- `frontend/vitest.config.js` actualizat: praguri 70%/60%/70% pe `src/components`, `src/hooks`, `src/pages`, `src/contexts`, `src/utils` (extinse pentru Stage 4B); `src/firebase.js` exclus din coverage.
+- 48 unit tests passed local pe frontend (de la 0). Toate țintele de coverage atinse: components/contexts/pages/utils la 95%+ pe orice metric.
+
 **Stage 4 Part A — Backend auth (Google SSO + own JWT) (2026-05-05, code complete, NOT committed):**
-- Decizie **D6 update**: Google SSO ONLY pentru MVP. Email/parolă și Microsoft SSO sunt amânate până când avem un tenant non-Workspace. 2FA delegat lui Google (Dianex are YubiKey + cont Google). Refuzăm login dacă token-ul Firebase nu are claim de second factor — vezi „Auth flow" mai sus pentru detalii.
+- Decizie **D6 update**: Google SSO ONLY pentru MVP. Email/parolă și Microsoft SSO sunt amânate până când avem un tenant non-Workspace. 2FA delegat lui Google. **Notă (revizuit 2026-05-05):** verificarea Firebase MFA suplimentară a fost relaxată după ce a respins userii Dianex legitimi cu YubiKey pe contul Google — backend-ul acceptă acum orice token Firebase valid; tenant_admin-ul forțează 2FA prin Google Workspace policy. Vezi nota „Stage 4 follow-up: MFA verification relaxed" mai jos și D6 revizuit în secțiunea „Auth flow".
 - `src/services/auth-service.js`: `validateFirebaseToken`, `emitJwt`, `emitRefreshToken`, `verifyJwt`, `resolveTenantUser`. Inițializare lazy a `firebase-admin` din service account JSON (citit din Secret Manager). JWT-uri proprii HS256 cu claim-uri: `sub`/`email`/`tenant_slug`/`tenant_id`/`role`/`type`/`jti`. `_deps` injectabil pentru `verifyIdToken`/`getSecret`/`pool`/`logger` în teste — toate I/O mock-uite la nivel unitar; JWT-urile reale sunt semnate/verificate end-to-end (jsonwebtoken).
 - `src/middleware/auth-middleware.js`: citește `Authorization: Bearer <jwt>`, refuză orice tip ≠ `access` (refresh-token-urile NU pot fi folosite ca acces direct). Populează `req.user = { firebaseUid, email, tenantSlug, tenantId, role, jti }`.
 - `src/middleware/require-role.js`: factory `requireRole(allowedRoles[])`. `req.user` lipsă → 401, rol nepermis → 403. Convenție: `platform_operator` NU primește implicit drepturile de `tenant_admin` — trebuie listat explicit dacă rute admin trebuie deschise lui.
