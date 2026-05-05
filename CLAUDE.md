@@ -522,6 +522,49 @@ să poată ținti staging și de pe o mașină cu `NODE_ENV=production`.
 
 ---
 
+## Auth flow (Stage 4)
+
+**Decizie D6 (MVP):** Google SSO ONLY via Firebase Identity Platform.
+Email/parolă și Microsoft SSO sunt amânate până când avem un tenant care nu
+e Google Workspace. 2FA e delegat lui Google (ex: Dianex folosește
+YubiKey/TOTP pe contul Google). Backend-ul REFUZĂ login dacă token-ul
+Firebase nu are claim de second factor (`firebase.sign_in_second_factor`
+sau custom claim `mfa_verified === true`) — răspuns 403 cu mesaj clar.
+
+**Fluxul end-to-end:**
+1. Frontend: utilizatorul apasă „Login cu Google" → Firebase Web SDK
+   declanșează popup-ul Google Sign-In (Google validează 2FA dacă e
+   configurat pe cont).
+2. Firebase emite un `idToken` (JWT semnat de Google) către frontend.
+3. Frontend face `POST /api/v1/auth/firebase-login { idToken }`.
+4. Backend (`auth-service.validateFirebaseToken`):
+   - Verifică `idToken` cu firebase-admin (semnătură + expirare).
+   - Verifică prezența claim-ului de 2FA — altfel 403.
+5. Backend (`resolveTenantUser`): caută `firebase_uid` în
+   `amef_shared.tenant_users JOIN amef_shared.tenants`. Dacă lipsește /
+   `is_active = false` / `deleted_at` setat → 403.
+6. Backend (`emitJwt` + `emitRefreshToken`): semnează JWT-uri proprii
+   (HS256, secret din Secret Manager) cu claim-uri:
+   `sub` (firebase_uid), `email`, `tenant_slug`, `tenant_id`, `role`,
+   `type` (access|refresh), `jti`, `iat`, `exp`.
+7. Frontend stochează JWT-ul (memorie pentru access, httpOnly cookie sau
+   secure storage pentru refresh — Stage 4 Part B decide).
+8. Pentru toate request-urile autenticate ulterioare, frontend trimite
+   `Authorization: Bearer <jwt>`. Middleware-ul `authMiddleware` validează
+   și populează `req.user`.
+9. La expirarea access-token-ului, frontend face `POST /api/v1/auth/refresh
+   { refreshToken }`; backend rotește perechea (emite atât access cât și
+   refresh nou) — astfel rolul curent e re-citit din DB la fiecare refresh.
+
+**Endpoint-uri:**
+- `POST /api/v1/auth/firebase-login` — public.
+- `POST /api/v1/auth/refresh` — public.
+- `POST /api/v1/auth/logout` — autentificat (audit-trail; MVP nu
+  invalidează token-urile server-side, durata scurtă a access-token-ului
+  limitează expunerea).
+
+---
+
 ## Roles in Portal AMEF
 
 3 roles total:
@@ -675,15 +718,15 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Stage 3 — Express app bootstrap (code & tests complete, pending review)
-**Last completed stage:** Stage 2 — Setup databases and migration runner (merged on main)
-**Next action:** Start Stage 4 — Login + Tenant Resolution (Firebase token verification, JWT issuing, `requireAuth`/`requireRole` middleware, tenant pool resolution).
+**Current stage:** Stage 4 Part A — Backend auth (Firebase Google SSO + own JWT). Code & tests complete, pending review.
+**Last completed stage:** Stage 3 — Express app bootstrap (merged on main).
+**Next action:** Stage 4 Part B — Frontend (login page, Firebase Web SDK, refresh token storage, route guards).
 
 ### Completed stages
 - [x] Stage 1 — Setup project and structure (incl. testing infrastructure)
 - [x] Stage 2 — Setup databases and migration runner (with tests)
-- [~] Stage 3 — Express app bootstrap: errors/, error-handler, 404 handler, /health, createApp, server.js (code complete, pending review)
-- [ ] Stage 4 — Login and Tenant Resolution (with full test suite)
+- [x] Stage 3 — Express app bootstrap (merged)
+- [~] Stage 4 — Login and Tenant Resolution (Part A backend done; Part B frontend pending)
 - [ ] Stage 5 — Clients module with ANAF auto-completion (with full test suite)
 - [ ] Stage 6 — Integration with erp-sync (with tests)
 - [ ] Stage 7 — Articles + Invoicing module (with full test suite)
@@ -700,20 +743,24 @@ When working on this codebase, NEVER do these things:
 > _Update after each test run._
 
 ```
-Last `pnpm test` run: 2026-05-05 (Stage 3 complete) — server: 189 passed + 5 integration skipped (no local Postgres),
-  frontend: 0 (passWithNoTests)
-Last `pnpm test:coverage` run: 2026-05-05 — server stats per file:
+Last `pnpm test` run: 2026-05-05 (Stage 4 Part A complete) — server: 244 passed + 20 integration skipped
+  (no local Postgres), frontend: 0 (passWithNoTests)
+Last `pnpm test:coverage` run: 2026-05-05 — server stats per file (stmt/branch/func/lines):
   - src/app.js:               100 / 100 / 100 / 100
   - src/config.js:            100 / 93.33 / 100 / 100
   - src/logger.js:            100 / 100 / 100 / 100
   - src/db/migrate.js:        100 / 100 / 100 / 100
   - src/db/pool.js:           99.34 / 100 / 83.33 / 99.34
   - src/errors/index.js:      100 / 100 / 100 / 100
-  - src/middleware/error-handler.js:    100 / 100 / 100 / 100  (threshold 100%)
-  - src/middleware/not-found-handler.js: 100 / 100 / 100 / 100
+  - src/middleware/auth-middleware.js:    100 / 100 / 100 / 100
+  - src/middleware/error-handler.js:      100 / 100 / 100 / 100  (threshold 100%)
+  - src/middleware/not-found-handler.js:  100 / 100 / 100 / 100
+  - src/middleware/require-role.js:       100 / 100 / 100 / 100
+  - src/routes/auth.js:       100 / 100 / 100 / 100
   - src/routes/health.js:     96.66 / 87.5 / 100 / 96.66       (threshold 70% — passes)
-  - src/utils/secret-manager.js: 100 / 100 / 100 / 100
-  - src/utils/secret-naming.js:  100 / 100 / 100 / 100
+  - src/services/auth-service.js: 100 / 90 / 100 / 100         (threshold 80% — passes)
+  - src/utils/secret-manager.js:  100 / 100 / 100 / 100
+  - src/utils/secret-naming.js:   100 / 100 / 100 / 100
   - src/db/migrate-cli.js + src/server.js: excluded from coverage (entry points)
 Integration tests against real Postgres run automatically in CI (postgres:18 service container).
 Locally, `pnpm test:integration` requires `TEST_DB_CONNECTION_STRING` to be set.
@@ -754,6 +801,17 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
 - Build scripts approved în `pnpm.onlyBuiltDependencies` din root `package.json`: `esbuild`, `protobufjs` (necesare pentru Vite și firebase-admin)
 - `.gitkeep` pentru a păstra în git folderele goale ale structurii
 - `app.js`, `config.js`, `logger.js` apar la Stage 3 conform planului
+
+**Stage 4 Part A — Backend auth (Google SSO + own JWT) (2026-05-05, code complete, NOT committed):**
+- Decizie **D6 update**: Google SSO ONLY pentru MVP. Email/parolă și Microsoft SSO sunt amânate până când avem un tenant non-Workspace. 2FA delegat lui Google (Dianex are YubiKey + cont Google). Refuzăm login dacă token-ul Firebase nu are claim de second factor — vezi „Auth flow" mai sus pentru detalii.
+- `src/services/auth-service.js`: `validateFirebaseToken`, `emitJwt`, `emitRefreshToken`, `verifyJwt`, `resolveTenantUser`. Inițializare lazy a `firebase-admin` din service account JSON (citit din Secret Manager). JWT-uri proprii HS256 cu claim-uri: `sub`/`email`/`tenant_slug`/`tenant_id`/`role`/`type`/`jti`. `_deps` injectabil pentru `verifyIdToken`/`getSecret`/`pool`/`logger` în teste — toate I/O mock-uite la nivel unitar; JWT-urile reale sunt semnate/verificate end-to-end (jsonwebtoken).
+- `src/middleware/auth-middleware.js`: citește `Authorization: Bearer <jwt>`, refuză orice tip ≠ `access` (refresh-token-urile NU pot fi folosite ca acces direct). Populează `req.user = { firebaseUid, email, tenantSlug, tenantId, role, jti }`.
+- `src/middleware/require-role.js`: factory `requireRole(allowedRoles[])`. `req.user` lipsă → 401, rol nepermis → 403. Convenție: `platform_operator` NU primește implicit drepturile de `tenant_admin` — trebuie listat explicit dacă rute admin trebuie deschise lui.
+- `src/routes/auth.js`: `POST /firebase-login`, `POST /refresh` (rotește ambele tokens; re-citește rolul din DB), `POST /logout` (auth-protected; MVP doar audit, fără revocare server-side). Body validat cu Zod; erorile cad pe error-handler-ul central.
+- `src/app.js`: mount `/api/v1/auth` ÎNAINTE de placeholder-ul `/api/v1` (specificitatea route-urilor contează în Express).
+- `src/config.js`: nou `FIREBASE_SERVICE_ACCOUNT_SECRET_NAME` (required string). `.env.example` actualizat.
+- Integration tests în `tests/integration/auth.integration.test.js` (15 tests) — Postgres real (CI service container), Firebase mock-uit prin `_deps.verifyIdToken`. Skipate local fără `TEST_DB_CONNECTION_STRING`.
+- 244 unit tests passed local (was 189; +55 net Stage 4a). Toate țintele de coverage atinse (auth-service 100/90/100/100; auth-middleware 100/100/100/100; require-role 100/100/100/100; routes/auth 100/100/100/100).
 
 **Stage 3 — Express app bootstrap (2026-05-05, code complete, NOT committed):**
 - `src/errors/index.js` — `AppError` + 5 subclase (`ValidationError`/`UnauthorizedError`/`ForbiddenError`/`NotFoundError`/`ConflictError`); fiecare cu `statusCode`+`code` proprii și `details?` opțional.

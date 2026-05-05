@@ -24,6 +24,7 @@ const rateLimit = require('express-rate-limit');
 const config = require('./config');
 const logger = require('./logger');
 const healthRouter = require('./routes/health');
+const authRouter = require('./routes/auth');
 const notFoundHandler = require('./middleware/not-found-handler');
 const errorHandler = require('./middleware/error-handler');
 
@@ -92,9 +93,13 @@ function createApp(options = {}) {
   // 6) Health — montat pe /health (NU /api/health) ca să bypass-eze rate limit-ul.
   app.use('/health', healthRouter);
 
-  // 7) Placeholder pentru rute API. Stage 4+ va monta aici:
-  //   /api/v1/auth, /api/v1/clients, /api/v1/invoices, etc.
-  // Ținem un router gol acum ca structura URL-ului să fie stabilă.
+  // 7) Rute API v1.
+  //   - /api/v1/auth e public (login/refresh) cu excepția /logout (auth-protected în router).
+  //   - Rute viitoare (clients, invoices, etc.) vor folosi authMiddleware
+  //     mai sus de mount, sau per-router.
+  app.use('/api/v1/auth', authRouter);
+  // Placeholder router pentru restul /api/v1 — păstrează structura URL-ului
+  // stabilă; vine populat în Stage 5+.
   const apiV1 = express.Router();
   app.use('/api/v1', apiV1);
 

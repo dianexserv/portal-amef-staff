@@ -13,6 +13,10 @@ vi.stubEnv('JWT_SECRET_NAME', 'jwt-secret-test');
 vi.stubEnv('JWT_EXPIRY_HOURS', '1');
 vi.stubEnv('REFRESH_TOKEN_EXPIRY_DAYS', '7');
 vi.stubEnv('FIREBASE_PROJECT_ID', 'portal-amef-test');
+vi.stubEnv(
+  'FIREBASE_SERVICE_ACCOUNT_SECRET_NAME',
+  'firebase-service-account-test'
+);
 
 const config = require('./config');
 const { loadConfig } = config;
@@ -26,6 +30,7 @@ const VALID_ENV = {
   JWT_EXPIRY_HOURS: '1',
   REFRESH_TOKEN_EXPIRY_DAYS: '7',
   FIREBASE_PROJECT_ID: 'portal-amef-test',
+  FIREBASE_SERVICE_ACCOUNT_SECRET_NAME: 'firebase-service-account-test',
 };
 
 describe('config (module-level export)', () => {
@@ -38,6 +43,9 @@ describe('config (module-level export)', () => {
     expect(config.JWT_EXPIRY_HOURS).toBe(1);
     expect(config.REFRESH_TOKEN_EXPIRY_DAYS).toBe(7);
     expect(config.FIREBASE_PROJECT_ID).toBe('portal-amef-test');
+    expect(config.FIREBASE_SERVICE_ACCOUNT_SECRET_NAME).toBe(
+      'firebase-service-account-test'
+    );
     expect(config.CORS_ORIGIN).toBe('http://localhost:5173');
   });
 
@@ -80,6 +88,7 @@ describe('config.loadConfig (factory)', () => {
       JWT_EXPIRY_HOURS: '',
       REFRESH_TOKEN_EXPIRY_DAYS: '',
       FIREBASE_PROJECT_ID: 'f',
+      FIREBASE_SERVICE_ACCOUNT_SECRET_NAME: 'fsa',
       CORS_ORIGIN: '',
     });
     expect(cfg.NODE_ENV).toBe('development');
@@ -95,6 +104,7 @@ describe('config.loadConfig (factory)', () => {
       GCP_PROJECT_ID: 'p',
       JWT_SECRET_NAME: 'j',
       FIREBASE_PROJECT_ID: 'f',
+      FIREBASE_SERVICE_ACCOUNT_SECRET_NAME: 'fsa',
     });
     expect(cfg.NODE_ENV).toBe('development');
     expect(cfg.PORT).toBe(3001);
@@ -109,6 +119,7 @@ describe('config.loadConfig (factory)', () => {
       GCP_PROJECT_ID: 'p',
       JWT_SECRET_NAME: 'j',
       FIREBASE_PROJECT_ID: 'f',
+      FIREBASE_SERVICE_ACCOUNT_SECRET_NAME: 'fsa',
       CORS_ORIGIN: 'https://amef.dianex.ro',
     });
     expect(cfg.CORS_ORIGIN).toBe('https://amef.dianex.ro');
@@ -133,6 +144,12 @@ describe('config.loadConfig (factory)', () => {
     expect(() =>
       loadConfig({ ...VALID_ENV, FIREBASE_PROJECT_ID: '' })
     ).toThrow(/FIREBASE_PROJECT_ID/);
+  });
+
+  it('aruncă eroare clară când FIREBASE_SERVICE_ACCOUNT_SECRET_NAME lipsește', () => {
+    expect(() =>
+      loadConfig({ ...VALID_ENV, FIREBASE_SERVICE_ACCOUNT_SECRET_NAME: '' })
+    ).toThrow(/FIREBASE_SERVICE_ACCOUNT_SECRET_NAME/);
   });
 
   it('aruncă pe env complet gol (toate câmpurile required lipsesc)', () => {
