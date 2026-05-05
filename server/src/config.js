@@ -62,12 +62,10 @@ const ConfigSchema = z.object({
   // Firebase Identity Platform — verificarea token-urilor SSO/2FA TOTP.
   FIREBASE_PROJECT_ID: requiredString('FIREBASE_PROJECT_ID'),
 
-  // Conexiunea către DB-ul `amef_shared` (date partajate cross-tenant).
-  // Pool-urile per-tenant își rezolvă singure secretele după convenția
-  // `tenant-{slug}-db-connection`.
-  SHARED_DB_CONNECTION_SECRET_NAME: requiredString(
-    'SHARED_DB_CONNECTION_SECRET_NAME'
-  ),
+  // Numele secretelor DB nu mai trec prin env: sunt derivate prin convenție
+  // din NODE_ENV + kind + slug în `utils/secret-naming.js`. O singură sursă
+  // de adevăr previne drift-ul (ex: dev care setează un nume custom prin
+  // env și uită).
 });
 
 function loadConfig(env = process.env) {

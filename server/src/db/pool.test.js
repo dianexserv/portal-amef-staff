@@ -17,7 +17,6 @@ vi.stubEnv('JWT_SECRET_NAME', 'jwt-secret-test');
 vi.stubEnv('JWT_EXPIRY_HOURS', '1');
 vi.stubEnv('REFRESH_TOKEN_EXPIRY_DAYS', '7');
 vi.stubEnv('FIREBASE_PROJECT_ID', 'portal-amef-test');
-vi.stubEnv('SHARED_DB_CONNECTION_SECRET_NAME', 'shared-db-connection-test');
 
 const pool = require('./pool');
 const realDeps = { ...pool._deps };
@@ -67,6 +66,9 @@ beforeEach(async () => {
     info: vi.fn(),
     debug: vi.fn(),
   };
+  // Default: imită config.NODE_ENV='production' (vezi vi.stubEnv mai sus).
+  // Tests individuale suprascriu pentru a verifica mapping-ul staging/dev.
+  pool._deps.getNodeEnv = () => 'production';
 });
 
 afterEach(async () => {
@@ -98,9 +100,25 @@ describe('getTenantPool', () => {
     expect(poolInstances).toHaveLength(2);
   });
 
-  it('citește connection string din Secret Manager cu numele tenant-{slug}', async () => {
+  it('citește connection string din secretul derivat (tenant + production)', async () => {
     await pool.getTenantPool('dianex');
     expect(getSecretMock).toHaveBeenCalledWith('tenant-dianex-db-connection');
+  });
+
+  it('NODE_ENV=staging derivă tenant-{slug}-staging-db-connection', async () => {
+    pool._deps.getNodeEnv = () => 'staging';
+    await pool.getTenantPool('dianex');
+    expect(getSecretMock).toHaveBeenCalledWith(
+      'tenant-dianex-staging-db-connection'
+    );
+  });
+
+  it('NODE_ENV=development → folosește DB-ul de staging (suffix -staging)', async () => {
+    pool._deps.getNodeEnv = () => 'development';
+    await pool.getTenantPool('dianex');
+    expect(getSecretMock).toHaveBeenCalledWith(
+      'tenant-dianex-staging-db-connection'
+    );
   });
 
   it('configurează pool-ul cu max=10 și idleTimeoutMillis=30000', async () => {
@@ -147,9 +165,21 @@ describe('getSharedPool', () => {
     expect(poolInstances).toHaveLength(1);
   });
 
-  it('citește connection string din SHARED_DB_CONNECTION_SECRET_NAME', async () => {
+  it('citește connection string din secretul derivat (shared + production)', async () => {
     await pool.getSharedPool();
-    expect(getSecretMock).toHaveBeenCalledWith('shared-db-connection-test');
+    expect(getSecretMock).toHaveBeenCalledWith('shared-db-connection');
+  });
+
+  it('NODE_ENV=staging derivă shared-staging-db-connection', async () => {
+    pool._deps.getNodeEnv = () => 'staging';
+    await pool.getSharedPool();
+    expect(getSecretMock).toHaveBeenCalledWith('shared-staging-db-connection');
+  });
+
+  it('NODE_ENV=development → folosește DB-ul de staging (suffix -staging)', async () => {
+    pool._deps.getNodeEnv = () => 'development';
+    await pool.getSharedPool();
+    expect(getSecretMock).toHaveBeenCalledWith('shared-staging-db-connection');
   });
 
   it('configurează shared pool cu max=5 și idleTimeoutMillis=30000', async () => {
