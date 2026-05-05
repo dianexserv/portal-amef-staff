@@ -62,6 +62,14 @@ const ConfigSchema = z.object({
   // Firebase Identity Platform — verificarea token-urilor SSO/2FA TOTP.
   FIREBASE_PROJECT_ID: requiredString('FIREBASE_PROJECT_ID'),
 
+  // Numele secretului din Secret Manager care conține JSON-ul service
+  // account-ului Firebase. Folosit la inițializarea firebase-admin pentru
+  // verifyIdToken. Valoarea NU se cachează în config — se citește lazy din
+  // utils/secret-manager (care are propriul TTL de 5 min).
+  FIREBASE_SERVICE_ACCOUNT_SECRET_NAME: requiredString(
+    'FIREBASE_SERVICE_ACCOUNT_SECRET_NAME'
+  ),
+
   // Origin permis pentru CORS — frontend-ul Vite rulează default pe :5173.
   // În staging/production setăm via .env la domeniul real (amef.dianex.ro).
   // Folosim string simplu (nu listă) ca să rămână config plat; pentru mai
