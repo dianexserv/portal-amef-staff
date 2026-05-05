@@ -25,6 +25,10 @@ module.exports = {
         // de deploy; nu are logică de testat unitar. Validarea reală a
         // pipeline-ului de migrare e în migrate.test.js + migrate.integration.test.js.
         'src/db/migrate-cli.js',
+        // Bootstrap entry — încarcă dotenv, pornește listener-ul HTTP,
+        // wire SIGTERM. Logica de aplicare e în app.js (testat direct cu
+        // Supertest); aici ar fi doar mocking de process.exit + listen.
+        'src/server.js',
       ],
       // Praguri per folder din CLAUDE.md (Testing Rules).
       // Vitest verifică pragurile doar pentru fișierele care match-uiesc glob-ul;

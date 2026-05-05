@@ -395,7 +395,10 @@ module.exports = {
 
 ### Error handling
 - Throw errors via centralized middleware (NO try-catch in every route)
-- Custom error classes: `ValidationError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`
+- Custom error classes: `ValidationError`, `NotFoundError`, `UnauthorizedError`, `ForbiddenError`, `ConflictError` — în `server/src/errors/index.js`. Toate moștenesc `AppError` (Error + `statusCode` + `code` + `details?`).
+- Convenție de flow: serviciile/route-urile **aruncă** erorile custom (sau lasă Zod/`ZodError` să curgă din `.parse()`); middleware-ul `server/src/middleware/error-handler.js` e singurul loc care formatează răspunsuri HTTP. NU faceți `res.status(...).json(...)` în route-uri pentru erori — rupe consistența și trebuie întreținut în multe locuri.
+- Format răspuns standard: `{ success: false, error: <mesaj uman>, code: <CONST_CODE>, details?: ... }`. Frontend-ul face logică pe `code` (nu pe mesaj — care poate fi tradus).
+- Erori HTTP din middleware-uri externe (body-parser `PayloadTooLargeError`, etc.) sunt detectate prin `err.statusCode` 4xx și expuse direct; 5xx-urile cad pe ramura generic-INTERNAL_ERROR. În production NU expunem `err.message`/`err.stack` pentru erori generice (poate conține detalii din DB).
 
 ### API responses
 ```javascript
@@ -621,8 +624,12 @@ REFRESH_TOKEN_EXPIRY_DAYS=7
 FIREBASE_PROJECT_ID=portal-amef|portal-amef-staging
 
 # Database
-SHARED_DB_CONNECTION_SECRET_NAME=shared-db-connection|shared-db-connection-staging
+# (Numele secretelor sunt derivate prin convenție din NODE_ENV — vezi
+#  „Secret naming convention" mai sus.)
 GCP_PROJECT_ID=portal-amef
+
+# CORS
+CORS_ORIGIN=http://localhost:5173
 
 # External services
 ANAF_API_BASE_URL=https://webservicesp.anaf.ro
@@ -668,14 +675,14 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Stage 3 — Connection pool and logger (next; pool already done in 2a, app.js wiring in 3)
-**Last completed stage:** Stage 2 — Setup databases and migration runner (2a + 2b complete, 2026-05-05)
-**Next action:** Start Stage 3 — Express app skeleton (`app.js`), pino-http middleware, basic health endpoint, error handling middleware.
+**Current stage:** Stage 3 — Express app bootstrap (code & tests complete, pending review)
+**Last completed stage:** Stage 2 — Setup databases and migration runner (merged on main)
+**Next action:** Start Stage 4 — Login + Tenant Resolution (Firebase token verification, JWT issuing, `requireAuth`/`requireRole` middleware, tenant pool resolution).
 
 ### Completed stages
 - [x] Stage 1 — Setup project and structure (incl. testing infrastructure)
 - [x] Stage 2 — Setup databases and migration runner (with tests)
-- [ ] Stage 3 — Connection pool and logger (with tests)
+- [~] Stage 3 — Express app bootstrap: errors/, error-handler, 404 handler, /health, createApp, server.js (code complete, pending review)
 - [ ] Stage 4 — Login and Tenant Resolution (with full test suite)
 - [ ] Stage 5 — Clients module with ANAF auto-completion (with full test suite)
 - [ ] Stage 6 — Integration with erp-sync (with tests)
@@ -693,16 +700,21 @@ When working on this codebase, NEVER do these things:
 > _Update after each test run._
 
 ```
-Last `pnpm test` run: 2026-05-05 (Stage 2 complete) — server: 91 passed + 5 integration skipped (no local Postgres),
+Last `pnpm test` run: 2026-05-05 (Stage 3 complete) — server: 189 passed + 5 integration skipped (no local Postgres),
   frontend: 0 (passWithNoTests)
 Last `pnpm test:coverage` run: 2026-05-05 — server stats per file:
-  - src/config.js:           100 / 93.33 / 100 / 100   (uncovered: branch in error path)
-  - src/logger.js:           100 / 100 / 100 / 100
-  - src/db/migrate.js:       100 / 100 / 100 / 100
-  - src/db/pool.js:          99.35 / 100 / 100 / 99.35 (uncovered: log line in cleanup catch)
+  - src/app.js:               100 / 100 / 100 / 100
+  - src/config.js:            100 / 93.33 / 100 / 100
+  - src/logger.js:            100 / 100 / 100 / 100
+  - src/db/migrate.js:        100 / 100 / 100 / 100
+  - src/db/pool.js:           99.34 / 100 / 83.33 / 99.34
+  - src/errors/index.js:      100 / 100 / 100 / 100
+  - src/middleware/error-handler.js:    100 / 100 / 100 / 100  (threshold 100%)
+  - src/middleware/not-found-handler.js: 100 / 100 / 100 / 100
+  - src/routes/health.js:     96.66 / 87.5 / 100 / 96.66       (threshold 70% — passes)
   - src/utils/secret-manager.js: 100 / 100 / 100 / 100
-  - src/db/migrate-cli.js:   excluded from coverage (CLI entry point, not unit-tested)
-  - services / middleware / routes: no files yet (thresholds skipped)
+  - src/utils/secret-naming.js:  100 / 100 / 100 / 100
+  - src/db/migrate-cli.js + src/server.js: excluded from coverage (entry points)
 Integration tests against real Postgres run automatically in CI (postgres:18 service container).
 Locally, `pnpm test:integration` requires `TEST_DB_CONNECTION_STRING` to be set.
 ```
@@ -742,6 +754,17 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
 - Build scripts approved în `pnpm.onlyBuiltDependencies` din root `package.json`: `esbuild`, `protobufjs` (necesare pentru Vite și firebase-admin)
 - `.gitkeep` pentru a păstra în git folderele goale ale structurii
 - `app.js`, `config.js`, `logger.js` apar la Stage 3 conform planului
+
+**Stage 3 — Express app bootstrap (2026-05-05, code complete, NOT committed):**
+- `src/errors/index.js` — `AppError` + 5 subclase (`ValidationError`/`UnauthorizedError`/`ForbiddenError`/`NotFoundError`/`ConflictError`); fiecare cu `statusCode`+`code` proprii și `details?` opțional.
+- `src/middleware/error-handler.js` — middleware central de erori. Cascadă: `AppError` → `statusCode/code` din clasă; `ZodError` → 400 cu `details` listă de issues; eroare cu `err.statusCode` 4xx (body-parser etc.) → expusă direct; orice altceva → 500 cu `INTERNAL_ERROR` (mesaj + stack expuse doar în development). Loghează cu `_deps.logger` + `req.id` din pino-http.
+- `src/middleware/not-found-handler.js` — un-liner care apelează `next(new NotFoundError(method + url))` ca middleware-ul central să formateze.
+- `src/routes/health.js` — `GET /health` (200 cu uptime/timestamp) + `GET /health?check=db` (probe pe `amef_shared.tenants LIMIT 1`; returnează 503 + `DB_UNAVAILABLE` la eșec ca probe-urile Cloud Run să poată distinge alive vs ready).
+- `src/app.js` — factory `createApp(options?)` care wire-uiește (în această ordine): `helmet` → `cors` (cu `CORS_ORIGIN` din config) → `pino-http` → `express.json({ limit: '1mb' })` → `rateLimit` (100/15min, **doar pe `/api/*`** ca probe-urile să bypass-eze) → `/health` router → placeholder `/api/v1` router (vine populat în Stage 4+) → `notFoundHandler` → `errorHandler`. `trust proxy: 1` pentru ca rate-limit să citească `X-Forwarded-For` corect pe Cloud Run.
+- `src/server.js` — entry point: `dotenv.config()` → `require('./config')` (validează env, fail-fast) → `createApp().listen(PORT)` → handler SIGTERM care închide listener-ul + apelează `closeAllPools` cu timeout de 8s. Cloud Run dă ~10s la deploy/scaling. Exclus din coverage (bootstrap, low-value pentru testare unitară).
+- `config.js`: adăugat `CORS_ORIGIN` (default `http://localhost:5173`); `.env.example` actualizat. `package.json` scripts: `start`/`dev` pointează acum pe `src/server.js`.
+- 91 de teste noi în Stage 3 (errors:12 + error-handler:21 + not-found-handler:2 + health:5 + app:10 + 4 noi în config + 6 noi în error-handler pentru branch coverage). Total server: 189 passed + 5 integration skipped (no local Postgres).
+- Praguri vitest pentru `src/middleware/**` (100%) acum în vigoare — `error-handler.js` și `not-found-handler.js` ating 100/100/100/100.
 
 **Stage 1 — Testing infrastructure (2026-05-05):**
 - `server/vitest.config.js` (CommonJS), `frontend/vitest.config.js` (ESM), praguri per glob conform tabelului din secțiunea Testing Rules
