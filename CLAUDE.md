@@ -473,6 +473,38 @@ read-only references during normal execution.
 
 ---
 
+## Secret naming convention
+
+Numele secretelor din GCP Secret Manager sunt derivate prin convenție din
+`utils/secret-naming.js` (`deriveSecretName(kind, env, slug)`). NU le hardcodați
+în `.env` și NU le construiți inline — `pool.js` și `migrate-cli.js` consumă
+helper-ul ca să avem un singur loc de modificat când regula se schimbă (ex:
+adăugare variantă `preview` pentru deploy-uri PR).
+
+| kind   | env        | secret name                              |
+|--------|------------|------------------------------------------|
+| shared | production | `shared-db-connection`                   |
+| shared | staging    | `shared-staging-db-connection`           |
+| tenant | production | `tenant-<slug>-db-connection`            |
+| tenant | staging    | `tenant-<slug>-staging-db-connection`    |
+
+Regula slug: `/^[a-z0-9-]+$/` (litere mici, cifre, cratimă). `kind` ∈
+{shared, tenant}, `env` ∈ {production, staging}; orice alt input aruncă.
+
+**Mapping NODE_ENV → env** (`envFromNodeEnv` în același modul):
+- `production` → `production`
+- `staging` → `staging`
+- `development` → `staging` (dev local atinge DB-ul de staging; nu vrem să
+  provisonăm o a treia DB pentru dev fără date reale)
+- orice alt NODE_ENV → `staging` (default safe — nu cădem accidental pe
+  production)
+
+`pool.js` derivă automat env-ul din `config.NODE_ENV`. `migrate-cli.js`
+acceptă `--env production|staging` explicit (default production) ca admin-ul
+să poată ținti staging și de pe o mașină cu `NODE_ENV=production`.
+
+---
+
 ## Database conventions
 
 - Schema per app: `amef` (NOT `public`)
@@ -736,6 +768,8 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
 - `.github/workflows/ci.yml` — service container `postgres:18`, healthcheck `pg_isready`, env `TEST_DB_CONNECTION_STRING` injectat la step-urile `test:integration` și `test:coverage`.
 - `server/package.json` și root `package.json`: scripturile `migrate:shared`/`migrate:tenant` apelează acum `migrate-cli.js`; `migrate:all` eliminat (nu reflectă D-per-tenant — fiecare DB tenant cere slug-ul lui).
 - **Stage 2: search_path setat via connection-string options atât în integration tests cât și în producție (`pool.js`)** — abordarea inițială cu `pool.on('connect', SET search_path)` rulează SET asincron, fără await, iar pg-pool nu așteaptă listener-ele. În testul de integrare CI s-a manifestat ca race condition (schema_migrations creat în schema greșită cross-runs), dar și în producție rămânea o suprafață fragilă (retries de conexiune, timeouts de protocol). Fix aplicat consistent: connection string-ul include `?options=-c+search_path=<schema>,public`, pe care Postgres îl aplică ATOMIC la handshake — orice query pe acel client vede deja search_path-ul corect, garantat de protocol. Beneficii: defense-in-depth, atomic, mai puțin cod (handler `on('connect')` eliminat din ambele pool-uri tenant + shared). Helper-ul `withSearchPath(connectionString, schema)` face URL transform-ul cu `URL.searchParams`.
+- **Stage 2: numele secretelor DB sunt derivate prin convenție (single source of truth)** — `utils/secret-naming.js` exportă `deriveSecretName(kind, env, slug?)` și `envFromNodeEnv(nodeEnv)`. Atât `pool.js` (derivă env din `NODE_ENV` via `_deps.getNodeEnv`) cât și `migrate-cli.js` (acceptă `--env production|staging`, default production) consumă helper-ul. `SHARED_DB_CONNECTION_SECRET_NAME` a fost eliminat din `config.js` și `.env.example` — nu mai există configurare ad-hoc a numelor. Vezi „Secret naming convention" mai sus pentru tabelul complet.
+- **Stage 2: `migrate-cli` suportă flag-ul `--env production|staging`** — schema și migrationsDir nu se schimbă în funcție de env (rămân `amef_shared`/`amef`). Doar numele secretului diferă. `parseArgs` acceptă flag-ul în orice poziție în argv (`tenant --env staging dianex` e echivalent cu `tenant dianex --env staging`).
 - **Stage 2: `schema_migrations` e creat cu schema EXPLICITĂ pasată la runtime, nu prin search_path** — chiar și cu search_path setat corect la handshake, migrațiile-utilizator pot conține `SET search_path TO ...` (cum face de fapt `001_init_shared.sql`), iar acea schimbare persistă pentru restul sesiunii. Asta însemna că un `INSERT INTO schema_migrations` care urma migrației putea ateriza într-o schema diferită de cea în care fusese creată tabela — inconsistențe cross-runs ce manifestau ca teste de idempotency rupte intermitent în CI. Fix: `applyMigrations(pool, dir, { schema: 'amef_shared' })` — toate query-urile pe `schema_migrations` referă schema explicit ca `"<schema>".schema_migrations`. Numele schemei e sanitizat regex `[a-z0-9_]+` (interpolare în identificator nu poate fi parametrizată în pg). Default-ul (când `schema` lipsește) citește prima schema din `current_schemas(false)` — fallback util doar pentru smoke-tests.
 
 **Sub-stage 2a — Config / Logger / Secret Manager / Pool (2026-05-05, code complete, NOT committed):**

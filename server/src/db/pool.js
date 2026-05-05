@@ -22,16 +22,24 @@ const { Pool } = require('pg');
 const config = require('../config');
 const secretManager = require('../utils/secret-manager');
 const realLogger = require('../logger');
+const {
+  deriveSecretName,
+  envFromNodeEnv,
+} = require('../utils/secret-naming');
 
 // _deps object exported strictly for testing. Tests mutate _deps.client/_deps.logger
 // to inject mocks. Production code MUST NOT touch _deps directly except in lazy init.
 //
 // În CJS, vi.mock NU interceptează require() și nu putem mock-ui pg/secret-manager
 // pe alte căi fără hack-uri fragile. Vezi „Testing seam pattern" în CLAUDE.md.
+//
+// `getNodeEnv` e o funcție (nu o valoare cached) ca testele să poată varia
+// răspunsul per-test fără re-import — config.NODE_ENV e capturat la load.
 const _deps = {
   PoolClass: Pool,
   getSecret: secretManager.getSecret,
   logger: realLogger,
+  getNodeEnv: () => config.NODE_ENV,
 };
 
 const tenantPools = new Map();
@@ -44,10 +52,6 @@ const POOL_IDLE_TIMEOUT_MS = 30000;
 // permitem re-resolve DNS (Cloud SQL IP poate pivota la failover) și să
 // nu ținem deschis un pool nefolosit pentru un tenant rar accesat.
 const IDLE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
-
-function buildTenantSecretName(tenantSlug) {
-  return `tenant-${tenantSlug}-db-connection`;
-}
 
 // Adaugă `?options=-c search_path=<schema>,public` la connection string.
 // Postgres aplică `options` la handshake — orice query pe conexiunea respectivă
@@ -66,9 +70,9 @@ async function getTenantPool(tenantSlug) {
   if (cached) {
     return cached;
   }
-  const rawConnectionString = await _deps.getSecret(
-    buildTenantSecretName(tenantSlug)
-  );
+  const env = envFromNodeEnv(_deps.getNodeEnv());
+  const secretName = deriveSecretName('tenant', env, tenantSlug);
+  const rawConnectionString = await _deps.getSecret(secretName);
   const pool = new _deps.PoolClass({
     connectionString: withSearchPath(rawConnectionString, 'amef'),
     max: TENANT_POOL_MAX,
@@ -82,9 +86,9 @@ async function getSharedPool() {
   if (sharedPool) {
     return sharedPool;
   }
-  const rawConnectionString = await _deps.getSecret(
-    config.SHARED_DB_CONNECTION_SECRET_NAME
-  );
+  const env = envFromNodeEnv(_deps.getNodeEnv());
+  const secretName = deriveSecretName('shared', env);
+  const rawConnectionString = await _deps.getSecret(secretName);
   sharedPool = new _deps.PoolClass({
     connectionString: withSearchPath(rawConnectionString, 'amef_shared'),
     max: SHARED_POOL_MAX,

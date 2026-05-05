@@ -13,7 +13,6 @@ vi.stubEnv('JWT_SECRET_NAME', 'jwt-secret-test');
 vi.stubEnv('JWT_EXPIRY_HOURS', '1');
 vi.stubEnv('REFRESH_TOKEN_EXPIRY_DAYS', '7');
 vi.stubEnv('FIREBASE_PROJECT_ID', 'portal-amef-test');
-vi.stubEnv('SHARED_DB_CONNECTION_SECRET_NAME', 'shared-db-connection-test');
 
 const config = require('./config');
 const { loadConfig } = config;
@@ -27,7 +26,6 @@ const VALID_ENV = {
   JWT_EXPIRY_HOURS: '1',
   REFRESH_TOKEN_EXPIRY_DAYS: '7',
   FIREBASE_PROJECT_ID: 'portal-amef-test',
-  SHARED_DB_CONNECTION_SECRET_NAME: 'shared-db-connection-test',
 };
 
 describe('config (module-level export)', () => {
@@ -40,9 +38,6 @@ describe('config (module-level export)', () => {
     expect(config.JWT_EXPIRY_HOURS).toBe(1);
     expect(config.REFRESH_TOKEN_EXPIRY_DAYS).toBe(7);
     expect(config.FIREBASE_PROJECT_ID).toBe('portal-amef-test');
-    expect(config.SHARED_DB_CONNECTION_SECRET_NAME).toBe(
-      'shared-db-connection-test'
-    );
   });
 
   it('exportă obiect înghețat (nu se poate modifica la runtime)', () => {
@@ -126,12 +121,6 @@ describe('config.loadConfig (factory)', () => {
     expect(() =>
       loadConfig({ ...VALID_ENV, FIREBASE_PROJECT_ID: '' })
     ).toThrow(/FIREBASE_PROJECT_ID/);
-  });
-
-  it('aruncă eroare clară când SHARED_DB_CONNECTION_SECRET_NAME lipsește', () => {
-    expect(() =>
-      loadConfig({ ...VALID_ENV, SHARED_DB_CONNECTION_SECRET_NAME: '' })
-    ).toThrow(/SHARED_DB_CONNECTION_SECRET_NAME/);
   });
 
   it('aruncă pe env complet gol (toate câmpurile required lipsesc)', () => {

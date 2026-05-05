@@ -32,7 +32,6 @@ vi.stubEnv('JWT_SECRET_NAME', 'jwt-secret-test');
 vi.stubEnv('JWT_EXPIRY_HOURS', '1');
 vi.stubEnv('REFRESH_TOKEN_EXPIRY_DAYS', '7');
 vi.stubEnv('FIREBASE_PROJECT_ID', 'portal-amef-test');
-vi.stubEnv('SHARED_DB_CONNECTION_SECRET_NAME', 'shared-db-connection-test');
 
 const { applyMigrations } = require('../../src/db/migrate');
 
