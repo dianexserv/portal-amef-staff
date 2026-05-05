@@ -21,6 +21,10 @@ module.exports = {
         'src/**/*.integration.test.js',
         'src/db/migrations/**',
         'src/db/setup/**',
+        // CLI thin wrapper — entry point invocat manual / din scripturi
+        // de deploy; nu are logică de testat unitar. Validarea reală a
+        // pipeline-ului de migrare e în migrate.test.js + migrate.integration.test.js.
+        'src/db/migrate-cli.js',
       ],
       // Praguri per folder din CLAUDE.md (Testing Rules).
       // Vitest verifică pragurile doar pentru fișierele care match-uiesc glob-ul;
