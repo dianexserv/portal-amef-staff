@@ -825,11 +825,11 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Sub-stage 5b — Service layer Modulul Clienți. `client-service.js` cu 9 funcții publice (createClientFromUi/Import, getClientById, findClientByFiscalCode/Email, listClients, updateClient, softDeleteClient, restoreClient) + 3 scheme Zod compuse cu `.merge()` (CreateClientFromUi/Import + UpdateClient) + maparea PG → AppError pe constraint name (4 mappings + fallback). 54 unit tests, coverage `client-service.js` 99.63/96.92/100/99.63. Code complete, NOT committed.
+**Current stage:** Sub-stage 5c — ANAF lookup service. `anaf-lookup-service.js` cu apel V9 webservice + retry exponențial (3 încercări) + cache in-memory cross-tenant 24h + fallback stale când ANAF e jos + Zod response validation cu `.passthrough()` peste tot. Helper-ul `judete-romania.js` extras separat (42 județe). `ServiceUnavailableError` adăugat în `errors/index.js`. 35 noi teste; coverage `anaf-lookup-service.js` 99.31/91.2/88.88/99.31, `judete-romania.js` 100%, `errors/index.js` rămâne 100%. Code complete, NOT committed.
 
-**Last completed stage:** Sub-stage 5a — DB schema (migrations 001 + 002 applied to staging + production, merged pe main).
+**Last completed stage:** Sub-stage 5b — Service layer Clienți (`client-service.js` 9 funcții + Zod + PG error mapping; 54 tests; merged pe main).
 
-**Next action:** Sub-stage 5c — ANAF lookup service (`anaf-lookup-service.js` cu cache 24h în `core_clients.anaf_data` + fallback graceful + cron zilnic re-verificare).
+**Next action:** Sub-stage 5d — Routes `/api/v1/clients/*` (CRUD + ANAF lookup endpoint) + integration tests + Bruno collection.
 
 ### Completed stages
 
@@ -839,8 +839,8 @@ When working on this codebase, NEVER do these things:
 - [x] Stage 4 — Login and Tenant Resolution (Part A backend + Part B frontend, merged)
 - [~] Stage 5 — Clients module with ANAF auto-completion
   - [x] 5a — DB schema (migrations 001 + 002 applied to staging + production, merged pe main)
-  - [~] 5b — Service layer (`client-service.js` 9 funcții + 3 scheme Zod + PG error mapping; 54 unit tests; code complete, NOT committed)
-  - [ ] 5c — ANAF lookup service (`anaf-lookup-service.js` with 24h cache + fallback)
+  - [x] 5b — Service layer (`client-service.js` 9 funcții + 3 scheme Zod + PG error mapping; 54 unit tests; merged pe main)
+  - [~] 5c — ANAF lookup service (`anaf-lookup-service.js` cu retry + cache 24h + stale fallback; `judete-romania.js` helper; 35 noi teste; code complete, NOT committed)
   - [ ] 5d — Routes `/api/v1/clients` + integration tests + Bruno collection
   - [ ] 5e — Frontend (listă + formular + auto-completare ANAF)
 - [ ] Stage 6 — Integration with erp-sync (with tests)
@@ -941,6 +941,47 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
   inactiv / șters / neînregistrat în tenant_users). Restul flow-ului
   neschimbat — frontend continuă să afișeze 403 pentru cazurile reale de
   ForbiddenError (cont neautorizat).
+
+**Sub-stage 5c — ANAF lookup service (2026-05-05, code complete, NOT committed):**
+- `server/src/services/anaf-lookup-service.js` (~330 linii) — wrapper peste ANAF V9 webservice (`POST https://webservicesp.anaf.ro/api/PlatitorTvaRest/v9/tva`). Pattern-uri replicate din implementarea Dianex (factura.js — în uz în producție): payload ARRAY de obiecte `[{ cui, data }]` (V9 e batch-capable, dar noi trimitem mereu 1 element), header `Content-Type: application/json`, timeout 15s. Diferențe față de Dianex: Pino logger în loc de log.factura, validare răspuns cu Zod, cache in-memory cu TTL 24h, erori prin AppError subclasses.
+- **Cache strategy** (option 2c — global cross-tenant, in-memory): `Map<cui:referenceDate, { data, cachedAt, referenceDate }>` la nivel de modul. Datele ANAF sunt publice, deci cache-ul cross-tenant e safe (un client cu același CUI la 2 tenanți primește același rezultat din cache). Cheia include `referenceDate` (`YYYY-MM-DD`) ca să distingă lookup-uri la date diferite (audit istoric). Pe restart Cloud Run cache-ul se pierde — primul lookup post-boot pentru un CUI = round-trip la ANAF (acceptabil pentru MVP; opțional Stage 12 mutăm în Memorystore Redis dacă scale-ul cere).
+- **Stale fallback (3c)**: când ANAF eșuează după toate retry-urile, dacă avem ORICE entry în cache (chiar expirat) returnăm `{ ...entry.data, stale: true }` în loc să aruncăm. UI-ul afișează banner „Date învechite — ANAF temporar indisponibil". Fără cache deloc → `ServiceUnavailableError(ANAF_UNAVAILABLE)`. Decizia: o sesiune întreagă cu ANAF down nu trebuie să blocheze contabilul de la editare; poate continua cu date de ieri.
+- **Retry strategy** (replică Dianex factura.js): `ANAF_MAX_RETRIES = 3`, backoff exponențial cu jitter `Math.pow(2, attempt) * 1000 + Math.random() * 1000` ms ca să de-sincronizeze instanțele Cloud Run dacă pornesc retry-uri simultan. `shouldRetry(err)` întoarce true pentru network errors (no `err.response`), 5xx și 429; bail-out imediat pe alte 4xx (e.g. 400 = payload broken — retry n-ar ajuta). Logger.warn pe fiecare retry, logger.error pe failure final.
+- **Zod response validation** (`AnafV9ResponseSchema`): `.passthrough()` peste tot (`date_generale`, `inregistrare_scop_Tva`, `stare_inactiv`, `inregistrare_SplitTVA`, `adresa_sediu_social`, `adresa_domiciliu_fiscal`, top-level). Motivație: ANAF schimbă/adaugă câmpuri auxiliare între versiuni minore (deja am văzut `statusRO_e_Factura` apărut într-o versiune V9 fără anunț). Validăm DOAR câmpurile pe care le folosim (cui, denumire, scpTVA, statusInactivi, statusSplitTVA), restul tolerăm. Răspuns malformat → `ServiceUnavailableError(ANAF_RESPONSE_INVALID)` cu log error pentru triage.
+- **CUI normalization** (`_normalizeCui`): acceptă integer (`1234567`), string fără prefix (`'1234567'`), string cu prefix RO și/sau spații (`'RO1234567'`, `'RO 1234567'`, `'ro1234567'`). Toate sunt convertite la string numeric pur care poate fi `parseInt`-uit pentru payload-ul ANAF (care cere CUI ca integer). Input nevalid (non-numeric, negativ, float) → `ValidationError(INVALID_CUI)`.
+- **Error mapping** (5 coduri custom prin `setErrorCode` + mutație post-construcție, pattern din 5b):
+
+| Caz | AppError | code custom |
+|-----|----------|-------------|
+| input nevalid → normalize fail | ValidationError | `INVALID_CUI` |
+| ANAF răspunde notFound | NotFoundError | `CUI_NOT_FOUND_AT_ANAF` |
+| răspuns shape invalid (Zod) | ServiceUnavailableError | `ANAF_RESPONSE_INVALID` |
+| API down după retries, fără cache | ServiceUnavailableError | `ANAF_UNAVAILABLE` |
+| API down DAR cache disponibil | (no throw) | returnează cu `stale: true` |
+
+- **Helper extras: `server/src/utils/judete-romania.js`** — mapping bidirecțional între numele județelor (fără diacritice, ca în seed-ul `core_representative_roles`) și codurile auto de 2 litere (ISO 3166-2:RO + lista oficială ANAF). 41 județe + Municipiul București = 42 entries. Funcții: `normalizeJudetCod(input)` (acceptă fie numele fie codul, returnează codul) și `prettyJudetName(code)` (cod → nume; cod necunoscut → input ca-i, defensive). Folosit la convertirea răspunsului ANAF (`dcod_JudetAuto: 'B'` → `county: 'Bucuresti'`).
+- **Bucharest sector extraction**: pentru județul `B` extragem „Sector N" din `ddenumire_Localitate` cu regex `/sector(?:ul)?\s*(\d)/i` — răspunsurile reale ANAF V9 conțin „BUCURESTI SECTORUL <N>", dar tolerăm și forma scurtă „SECTOR <N>" pentru robustețe.
+- **`ServiceUnavailableError` (nou în `errors/index.js`)** — statusCode 503, default code `SERVICE_UNAVAILABLE`. Folosit pentru ANAF down și (viitor) orice altă dependință externă cu disponibilitate variabilă. 2 teste noi în `errors/index.test.js` (instance check + cod custom prin mutație).
+- **Test seam `_deps`**: `httpClient` (default = wrapper peste `axios.post`), `logger`, `now` — toate injectabile. Testele NU folosesc `vi.mock` pe axios (consistent cu Stage 2a lesson în CLAUDE.md). Default httpClient e o funcție mică externalizată (linii 62-64 — neacoperite în coverage pentru că tests injectează mock-ul).
+- **`axios` adăugat ca dependență server** — `pnpm add axios@^1.16.0` (același range ca frontend). Folosit doar pentru ANAF V9 acum; viitoarele integrări externe (anaf-signer Stage 9, erp-sync Stage 6) îl vor refolosi.
+- **35 noi teste**:
+  - `judete-romania.test.js` — 14 teste (3 pentru maps, 7 pentru `normalizeJudetCod`, 4 pentru `prettyJudetName`).
+  - `anaf-lookup-service.test.js` — 27 teste organizate pe scenarii:
+    - `_normalizeCui` (5): integer, RO prefix, case-insensitive, integer, invalid input.
+    - `lookupByCui — happy path` (6): cache miss, cache hit, skipCache, referenceDate diferit, Date object, fără referenceDate.
+    - `lookupByCui — notFound` (2): NotFoundError, NU caching.
+    - `lookupByCui — retry` (5): 500 → success, network → success, 3× 5xx fără cache → ServiceUnavailable, fallback la stale cache, 4xx no retry.
+    - `lookupByCui — răspuns malformat` (3): lipsește found, denumire missing, found+notFound goale.
+    - `cache management` (3): stocare cu cachedAt, expirare la 24h, _clearCache().
+    - `mapping adresa non-București` (3): Cluj cu localitate normală, judet cod necunoscut → empty, adresa lipsă complet → câmpuri goale.
+  - `errors/index.test.js` — 2 teste noi pentru ServiceUnavailableError + 1 update la „toate moștenesc Error" (acum 6 instances).
+- **Coverage:**
+  - `anaf-lookup-service.js`: 99.31% statements / 91.2% branches / 88.88% functions / 99.31% lines (ținta 80/70/80/80 — depășită). Liniile 62-64 neacoperite = `defaultHttpClient` (neexecutat pentru că testele injectează mock direct pe `_deps.httpClient`).
+  - `judete-romania.js`: 100% peste tot.
+  - `errors/index.js`: 100% peste tot (păstrat).
+- **Test duration**: ~12 secunde pe `anaf-lookup-service.test.js` din cauza retry-urilor cu setTimeout real (4 teste × backoff exponențial). Acceptabil pentru CI; dacă devine problemă, mutăm `sleep` în `_deps` pentru testing rapid.
+- Total server suite: 338 passed + 19 skipped (de la 295 înainte de 5c — net +43 noi: +35 din 5c + 1 update +7 reorganizate).
+- **Out of scope (confirmare):** rute Express (5d), integrare frontend (5e), cron de re-verificare zilnic (deferat la Stage 12), persistență cache în DB (decision: option 2c — in-memory only).
 
 **Sub-stage 5b — Service layer Modulul Clienți (2026-05-05, code complete, NOT committed):**
 - `server/src/services/client-service.js` (~480 linii) — 9 funcții publice:

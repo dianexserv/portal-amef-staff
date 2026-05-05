@@ -60,6 +60,17 @@ class ConflictError extends AppError {
   }
 }
 
+// 503 — semnal pentru clienți că serviciul e DOWN dar request-ul în sine
+// e valid; clientul ar trebui să încerce mai târziu (alternativ să folosească
+// fallback-ul cached, ex: ANAF down → returnăm date stale din cache).
+// Folosit în Stage 5c pentru ANAF webservice și (viitor) pentru orice altă
+// dependință externă cu disponibilitate variabilă.
+class ServiceUnavailableError extends AppError {
+  constructor(message, details) {
+    super(message, 503, 'SERVICE_UNAVAILABLE', details);
+  }
+}
+
 module.exports = {
   AppError,
   ValidationError,
@@ -67,4 +78,5 @@ module.exports = {
   ForbiddenError,
   NotFoundError,
   ConflictError,
+  ServiceUnavailableError,
 };
