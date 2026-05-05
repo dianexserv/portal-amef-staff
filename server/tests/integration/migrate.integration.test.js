@@ -46,6 +46,11 @@ const SHARED_MIGRATIONS_DIR = path.join(
   'shared'
 );
 
+// Toate testele integration vizează DB-ul shared — schema-ul e pasat EXPLICIT
+// la applyMigrations ca tracking-ul (`schema_migrations`) să nu depindă de
+// search_path-ul curent (care poate fi mutat de migrațiile-utilizator).
+const SHARED_OPTS = { schema: 'amef_shared' };
+
 skipIfNoDb('migrate (integration, real Postgres)', () => {
   let pool;
 
@@ -89,14 +94,16 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
   });
 
   it('pe DB curat creează schema_migrations + aplică toate fișierele shared', async () => {
-    const result = await applyMigrations(pool, SHARED_MIGRATIONS_DIR);
+    const result = await applyMigrations(pool, SHARED_MIGRATIONS_DIR, SHARED_OPTS);
 
     expect(result.applied).toContain('001_init_shared.sql');
     expect(result.skipped).toEqual([]);
 
-    // schema_migrations are rândul corespunzător
+    // schema_migrations are rândul corespunzător — interogăm cu schema EXPLICITĂ
+    // ca să nu depindem de search_path-ul curent (care poate fi schimbat de
+    // migrațiile rulate).
     const { rows } = await pool.query(
-      'SELECT filename FROM schema_migrations ORDER BY filename'
+      'SELECT filename FROM amef_shared.schema_migrations ORDER BY filename'
     );
     expect(rows.map((r) => r.filename)).toEqual(result.applied);
 
@@ -113,8 +120,8 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
   });
 
   it('a doua rulare sare peste 001 (idempotent)', async () => {
-    await applyMigrations(pool, SHARED_MIGRATIONS_DIR);
-    const second = await applyMigrations(pool, SHARED_MIGRATIONS_DIR);
+    await applyMigrations(pool, SHARED_MIGRATIONS_DIR, SHARED_OPTS);
+    const second = await applyMigrations(pool, SHARED_MIGRATIONS_DIR, SHARED_OPTS);
     expect(second.applied).toEqual([]);
     expect(second.skipped).toContain('001_init_shared.sql');
   });
@@ -135,12 +142,12 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
       );
 
       // Prima rulare aplică 001
-      const first = await applyMigrations(pool, tmp);
+      const first = await applyMigrations(pool, tmp, SHARED_OPTS);
       expect(first.applied).toContain('001_init_shared.sql');
       expect(first.applied).toContain('002_test_marker.sql');
 
       // A doua rulare le sare pe ambele
-      const second = await applyMigrations(pool, tmp);
+      const second = await applyMigrations(pool, tmp, SHARED_OPTS);
       expect(second.applied).toEqual([]);
       expect(second.skipped).toEqual(
         expect.arrayContaining(['001_init_shared.sql', '002_test_marker.sql'])
@@ -161,7 +168,7 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
 
   it('SQL invalid → aruncă, ROLLBACK, niciun efect parțial', async () => {
     // Aplicăm întâi 001 ca să avem schema
-    await applyMigrations(pool, SHARED_MIGRATIONS_DIR);
+    await applyMigrations(pool, SHARED_MIGRATIONS_DIR, SHARED_OPTS);
 
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'amef-mig-bad-'));
     try {
@@ -172,7 +179,7 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
         `CREATE TABLE amef_shared.partial_table (id INT);
          THIS_IS_NOT_SQL;`
       );
-      await expect(applyMigrations(pool, tmp)).rejects.toThrow(
+      await expect(applyMigrations(pool, tmp, SHARED_OPTS)).rejects.toThrow(
         /Migrație eșuată "999_broken\.sql"/
       );
 
@@ -183,9 +190,9 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
       );
       expect(rows).toHaveLength(0);
 
-      // 999 NU e marcat ca aplicat
+      // 999 NU e marcat ca aplicat — interogăm cu schema EXPLICITĂ
       const { rows: applied } = await pool.query(
-        "SELECT filename FROM schema_migrations WHERE filename = '999_broken.sql'"
+        "SELECT filename FROM amef_shared.schema_migrations WHERE filename = '999_broken.sql'"
       );
       expect(applied).toHaveLength(0);
     } finally {
@@ -200,8 +207,8 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
     // Așteptăm ca după ambele să avem un singur rând în schema_migrations
     // pentru 001.
     const [a, b] = await Promise.all([
-      applyMigrations(pool, SHARED_MIGRATIONS_DIR),
-      applyMigrations(pool, SHARED_MIGRATIONS_DIR),
+      applyMigrations(pool, SHARED_MIGRATIONS_DIR, SHARED_OPTS),
+      applyMigrations(pool, SHARED_MIGRATIONS_DIR, SHARED_OPTS),
     ]);
 
     const totalApplied = [...a.applied, ...b.applied].filter(
@@ -211,7 +218,7 @@ skipIfNoDb('migrate (integration, real Postgres)', () => {
     expect(totalApplied).toHaveLength(1);
 
     const { rows } = await pool.query(
-      "SELECT COUNT(*)::int AS c FROM schema_migrations WHERE filename = '001_init_shared.sql'"
+      "SELECT COUNT(*)::int AS c FROM amef_shared.schema_migrations WHERE filename = '001_init_shared.sql'"
     );
     expect(rows[0].c).toBe(1);
   });

@@ -5,14 +5,23 @@
 // reproductibil și nu introduce o dependență grea pentru ceva ce facem rar.
 //
 // Strategie de aplicare:
-//   1. Acquire `pg_advisory_lock(MIGRATION_ADVISORY_LOCK_ID)` — într-un mediu
+//   1. Determinăm SCHEMA țintă pentru `schema_migrations` la pornire — fie din
+//      opțiunea `{ schema: ... }` (recomandat), fie via `current_schemas(false)[1]`
+//      ca fallback. Numele se sanitizează regex `[a-z0-9_]+` ca să prevenim
+//      SQL injection prin interpolare în identificator (NU putem parametriza
+//      identificatorii în pg, doar valorile).
+//   2. `CREATE SCHEMA IF NOT EXISTS "<schema>"` apoi `CREATE TABLE IF NOT
+//      EXISTS "<schema>".schema_migrations (...)` — toate query-urile pe
+//      `schema_migrations` referă schema EXPLICIT, ca migrațiile-utilizator
+//      să nu poată muta tracking-ul prin `SET search_path` mid-session.
+//   3. Acquire `pg_advisory_lock(MIGRATION_ADVISORY_LOCK_ID)` — într-un mediu
 //      Cloud Run cu auto-scaling, două instanțe pot porni simultan și amândouă
 //      pot încerca să aplice migrațiile. Advisory lock-ul Postgres e per-DB
 //      și ne dă mutex în jurul întregului proces, evitând dublarea.
-//   2. Pentru fiecare fișier ne-aplicat, BEGIN tranzacție → rulează SQL →
+//   4. Pentru fiecare fișier ne-aplicat, BEGIN tranzacție → rulează SQL →
 //      INSERT în `schema_migrations` → COMMIT. Dacă SQL-ul eșuează, ROLLBACK
 //      lasă DB-ul exact ca înainte și aruncăm cu mesaj clar (filename inclus).
-//   3. Lock-ul e eliberat în finally — chiar dacă o migrație eșuează, alte
+//   5. Lock-ul e eliberat în finally — chiar dacă o migrație eșuează, alte
 //      instanțe pot încerca după ce remediem problema, fără reboot manual.
 //
 // `_deps` (vezi „Testing seam pattern" în CLAUDE.md) ne permite să injectăm
@@ -37,14 +46,41 @@ const _deps = {
 // chei diferite. 9182734 e numărul nostru; nu trebuie să se schimbe niciodată.
 const MIGRATION_ADVISORY_LOCK_ID = 9182734;
 
-// SQL pentru tabela de tracking. CREATE IF NOT EXISTS îl face idempotent —
-// poate rula de oricâte ori fără efecte secundare.
-const SCHEMA_MIGRATIONS_DDL = `
-  CREATE TABLE IF NOT EXISTS schema_migrations (
-    filename VARCHAR(255) PRIMARY KEY,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )
-`;
+// Sanitizare strictă pentru numele schemei. pg NU permite parametrizarea
+// identificatorilor (doar valorilor), deci interpolarea în SQL e necesară —
+// regex-ul închide ușa pentru orice caracter care ar putea sparge ghilimelele
+// (ex: `amef"; DROP TABLE foo --`).
+const SCHEMA_NAME_REGEX = /^[a-z0-9_]+$/;
+
+function validateSchema(schema) {
+  if (typeof schema !== 'string' || !SCHEMA_NAME_REGEX.test(schema)) {
+    throw new Error(
+      `Numele schemei invalid: "${schema}". ` +
+        'Permis doar [a-z0-9_]+ (prevenire SQL injection prin interpolare).'
+    );
+  }
+  return schema;
+}
+
+async function resolveSchema(client, providedSchema) {
+  if (providedSchema !== undefined) {
+    return validateSchema(providedSchema);
+  }
+  // Fallback: prima schema din search_path-ul curent. `current_schemas(false)`
+  // exclude pg_catalog implicit — dacă search_path-ul nu conține nimic
+  // configurat de noi, vrem să eșuăm explicit, nu să cădem pe pg_catalog/public.
+  const result = await client.query(
+    'SELECT current_schemas(false)[1] AS schema'
+  );
+  const fallback = result.rows[0] && result.rows[0].schema;
+  if (!fallback) {
+    throw new Error(
+      'Nu pot determina schema implicită — search_path-ul e gol sau invalid. ' +
+        'Pasează explicit { schema: "..." } la applyMigrations.'
+    );
+  }
+  return validateSchema(fallback);
+}
 
 function listMigrationFiles(dir) {
   const entries = _deps.fs.readdirSync(dir);
@@ -55,12 +91,12 @@ function listMigrationFiles(dir) {
     .sort((a, b) => a.localeCompare(b));
 }
 
-async function listAppliedMigrations(pool) {
-  // Dacă tabela încă nu există (prima rulare), interogarea ar arunca —
-  // creăm tabela mai întâi în applyMigrations, deci aici presupunem că
-  // există. Helper-ul e public pentru introspecție din alte module.
+async function listAppliedMigrations(pool, schema) {
+  const safe = validateSchema(schema);
+  // Helper public pentru introspecție; presupune că tabela există deja
+  // (creată de applyMigrations la prima rulare).
   const result = await pool.query(
-    'SELECT filename FROM schema_migrations ORDER BY filename ASC'
+    `SELECT filename FROM "${safe}".schema_migrations ORDER BY filename ASC`
   );
   return result.rows.map((r) => r.filename);
 }
@@ -70,8 +106,15 @@ function readMigrationSql(dir, filename) {
   return _deps.fs.readFileSync(fullPath, 'utf8');
 }
 
-async function applyMigrations(pool, migrationsDir, loggerOverride) {
+async function applyMigrations(pool, migrationsDir, options = {}) {
+  const { schema: providedSchema, logger: loggerOverride } = options;
   const log = loggerOverride || _deps.logger;
+
+  // Validăm schema-ul EARLY (sync) când e furnizat — eșuăm rapid fără să
+  // ținem o conexiune ocupată dacă inputul e invalid.
+  if (providedSchema !== undefined) {
+    validateSchema(providedSchema);
+  }
 
   // Folosim un singur client (nu pool.query) ca să garantăm același conex
   // pe tot parcursul: advisory lock + tranzacții + release trebuie pe aceeași
@@ -79,7 +122,18 @@ async function applyMigrations(pool, migrationsDir, loggerOverride) {
   const client = await pool.connect();
   let lockAcquired = false;
   try {
-    await client.query(SCHEMA_MIGRATIONS_DDL);
+    const schema = await resolveSchema(client, providedSchema);
+
+    // Asigurăm existența schemei ÎNAINTE de table — `CREATE SCHEMA IF NOT
+    // EXISTS` e idempotent. Necesar mai ales pentru DB-urile tenant unde
+    // prima migrație de utilizator încă nu a rulat și schema `amef` lipsește.
+    await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
+    await client.query(
+      `CREATE TABLE IF NOT EXISTS "${schema}".schema_migrations (
+         filename VARCHAR(255) PRIMARY KEY,
+         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`
+    );
 
     await client.query('SELECT pg_advisory_lock($1)', [
       MIGRATION_ADVISORY_LOCK_ID,
@@ -89,7 +143,7 @@ async function applyMigrations(pool, migrationsDir, loggerOverride) {
     // Re-citim fișierele aplicate DUPĂ acquisition lock — altă instanță
     // putea aplica între timp, vrem să vedem starea curentă.
     const appliedRes = await client.query(
-      'SELECT filename FROM schema_migrations ORDER BY filename ASC'
+      `SELECT filename FROM "${schema}".schema_migrations ORDER BY filename ASC`
     );
     const appliedSet = new Set(appliedRes.rows.map((r) => r.filename));
 
@@ -107,15 +161,18 @@ async function applyMigrations(pool, migrationsDir, loggerOverride) {
         await client.query('BEGIN');
         await client.query(sql);
         await client.query(
-          'INSERT INTO schema_migrations (filename) VALUES ($1)',
+          `INSERT INTO "${schema}".schema_migrations (filename) VALUES ($1)`,
           [filename]
         );
         await client.query('COMMIT');
         applied.push(filename);
-        log.info({ filename }, 'Migrație aplicată');
+        log.info({ filename, schema }, 'Migrație aplicată');
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
-        log.error({ err, filename }, 'Migrație eșuată — ROLLBACK efectuat');
+        log.error(
+          { err, filename, schema },
+          'Migrație eșuată — ROLLBACK efectuat'
+        );
         // Wrap explicit cu numele fișierului — mesajul brut din pg
         // („syntax error at or near...") nu spune CARE migrație a căzut.
         throw new Error(

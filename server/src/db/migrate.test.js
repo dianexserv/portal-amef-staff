@@ -25,9 +25,19 @@ const {
 
 const realDeps = { ...migrate._deps };
 
+// Toate testele care nu testează rezolvarea default a schemei trec un schema
+// explicit ca să imite uzul real (CLI / app code). 'amef' e o alegere
+// arbitrară — pentru mock pool nu contează valoarea, doar prefix-ul în SQL.
+const TEST_OPTS = { schema: 'amef' };
+
 // Helper: fabrică un client fals care înregistrează toate query-urile.
-// `appliedSeed` controlează ce returnează SELECT-ul după acquire lock.
-function makeClient({ appliedSeed = [], failOn = null } = {}) {
+// `appliedSeed` controlează ce returnează SELECT-ul pe schema_migrations.
+// `defaultSchema` controlează ce returnează SELECT current_schemas(false)[1].
+function makeClient({
+  appliedSeed = [],
+  failOn = null,
+  defaultSchema = 'amef',
+} = {}) {
   const calls = [];
   const client = {
     calls,
@@ -38,10 +48,15 @@ function makeClient({ appliedSeed = [], failOn = null } = {}) {
       if (failOn && typeof sql === 'string' && sql.includes(failOn)) {
         throw new Error('boom: ' + failOn);
       }
+      // Default-schema lookup
+      if (typeof sql === 'string' && sql.includes('current_schemas(false)')) {
+        return { rows: [{ schema: defaultSchema }] };
+      }
       // SELECT-ul de schema_migrations returnează seed-ul
       if (
         typeof sql === 'string' &&
-        sql.includes('SELECT filename FROM schema_migrations')
+        sql.includes('SELECT filename') &&
+        sql.includes('schema_migrations')
       ) {
         return { rows: appliedSeed.map((f) => ({ filename: f })) };
       }
@@ -110,17 +125,25 @@ describe('listMigrationFiles', () => {
 });
 
 describe('listAppliedMigrations', () => {
-  it('interoghează schema_migrations sortat ascendent', async () => {
+  it('interoghează schema_migrations cu schema explicită', async () => {
     const pool = {
       query: vi.fn().mockResolvedValue({
         rows: [{ filename: '001_a.sql' }, { filename: '002_b.sql' }],
       }),
     };
-    const result = await listAppliedMigrations(pool);
+    const result = await listAppliedMigrations(pool, 'amef_shared');
     expect(result).toEqual(['001_a.sql', '002_b.sql']);
     expect(pool.query).toHaveBeenCalledWith(
-      'SELECT filename FROM schema_migrations ORDER BY filename ASC'
+      'SELECT filename FROM "amef_shared".schema_migrations ORDER BY filename ASC'
     );
+  });
+
+  it('respinge schema name invalid', async () => {
+    const pool = { query: vi.fn() };
+    await expect(
+      listAppliedMigrations(pool, 'amef"; DROP TABLE--')
+    ).rejects.toThrow(/Numele schemei invalid/);
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });
 
@@ -137,15 +160,16 @@ describe('applyMigrations — happy path', () => {
     const client = makeClient({ appliedSeed: [] });
     const pool = makePool(client);
 
-    const result = await applyMigrations(pool, '/migs');
+    const result = await applyMigrations(pool, '/migs', TEST_OPTS);
 
     expect(result.applied).toEqual(['001_a.sql', '002_b.sql']);
     expect(result.skipped).toEqual([]);
 
-    // Verificăm secvența esențială: CREATE TABLE schema_migrations,
+    // Verificăm secvența esențială: CREATE SCHEMA, CREATE TABLE schema_migrations,
     // pg_advisory_lock, BEGIN, SQL, INSERT, COMMIT (de două ori), unlock.
     const sqls = client.calls.map((c) => c.sql);
-    expect(sqls.some((s) => s.includes('schema_migrations'))).toBe(true);
+    expect(sqls.some((s) => s.includes('CREATE SCHEMA IF NOT EXISTS "amef"'))).toBe(true);
+    expect(sqls.some((s) => s.includes('"amef".schema_migrations'))).toBe(true);
     expect(sqls.some((s) => s.includes('pg_advisory_lock'))).toBe(true);
     expect(sqls.filter((s) => s === 'BEGIN')).toHaveLength(2);
     expect(sqls.filter((s) => s === 'COMMIT')).toHaveLength(2);
@@ -165,7 +189,7 @@ describe('applyMigrations — happy path', () => {
     const client = makeClient({ appliedSeed: ['001_a.sql'] });
     const pool = makePool(client);
 
-    const result = await applyMigrations(pool, '/migs');
+    const result = await applyMigrations(pool, '/migs', TEST_OPTS);
 
     expect(result.applied).toEqual(['002_b.sql']);
     expect(result.skipped).toEqual(['001_a.sql']);
@@ -181,7 +205,7 @@ describe('applyMigrations — happy path', () => {
     const client = makeClient({ appliedSeed: [] });
     const pool = makePool(client);
 
-    const result = await applyMigrations(pool, '/migs');
+    const result = await applyMigrations(pool, '/migs', TEST_OPTS);
 
     expect(result).toEqual({ applied: [], skipped: [] });
     const sqls = client.calls.map((c) => c.sql);
@@ -197,7 +221,7 @@ describe('applyMigrations — happy path', () => {
     });
     const pool = makePool(client);
 
-    const result = await applyMigrations(pool, '/migs');
+    const result = await applyMigrations(pool, '/migs', TEST_OPTS);
 
     expect(result.applied).toEqual([]);
     expect(result.skipped).toEqual(['001_a.sql', '002_b.sql']);
@@ -206,13 +230,13 @@ describe('applyMigrations — happy path', () => {
   });
 });
 
-describe('applyMigrations — schema_migrations bootstrap', () => {
+describe('applyMigrations — schema explicit vs default', () => {
   it('creează schema_migrations dacă nu există (CREATE IF NOT EXISTS)', async () => {
     migrate._deps.fs.readdirSync = vi.fn(() => []);
     const client = makeClient({ appliedSeed: [] });
     const pool = makePool(client);
 
-    await applyMigrations(pool, '/migs');
+    await applyMigrations(pool, '/migs', TEST_OPTS);
 
     const sqls = client.calls.map((c) => c.sql);
     const ddlCall = sqls.find(
@@ -220,6 +244,78 @@ describe('applyMigrations — schema_migrations bootstrap', () => {
     );
     expect(ddlCall).toBeDefined();
     expect(ddlCall).toContain('IF NOT EXISTS');
+  });
+
+  it('creează schema_migrations în schema explicită, nu default', async () => {
+    migrate._deps.fs.readdirSync = vi.fn(() => []);
+    const client = makeClient({ appliedSeed: [] });
+    const pool = makePool(client);
+
+    await applyMigrations(pool, '/migs', { schema: 'custom_x' });
+
+    const sqls = client.calls.map((c) => c.sql);
+    expect(sqls.some((s) => s.includes('"custom_x".schema_migrations'))).toBe(true);
+    expect(sqls.some((s) => s.includes('CREATE SCHEMA IF NOT EXISTS "custom_x"'))).toBe(true);
+    // Nu trebuie să atingă alte schema-uri
+    expect(sqls.some((s) => s.includes('"amef".schema_migrations'))).toBe(false);
+    expect(sqls.some((s) => s.includes('"amef_shared".schema_migrations'))).toBe(false);
+    // Default-ul (current_schemas) nu e interogat când schema e furnizată
+    expect(sqls.some((s) => s.includes('current_schemas'))).toBe(false);
+  });
+
+  it('când schema NU e furnizată, citește prima schema din search_path', async () => {
+    migrate._deps.fs.readdirSync = vi.fn(() => []);
+    const client = makeClient({
+      appliedSeed: [],
+      defaultSchema: 'amef_shared',
+    });
+    const pool = makePool(client);
+
+    await applyMigrations(pool, '/migs');
+
+    const sqls = client.calls.map((c) => c.sql);
+    // current_schemas a fost interogat
+    expect(sqls.some((s) => s.includes('current_schemas(false)'))).toBe(true);
+    // Schema rezolvată e folosită în CREATE TABLE
+    expect(sqls.some((s) => s.includes('"amef_shared".schema_migrations'))).toBe(true);
+  });
+
+  it('aruncă dacă search_path-ul e gol și nu s-a furnizat schema', async () => {
+    migrate._deps.fs.readdirSync = vi.fn(() => []);
+    const client = makeClient({ appliedSeed: [], defaultSchema: null });
+    const pool = makePool(client);
+
+    await expect(applyMigrations(pool, '/migs')).rejects.toThrow(
+      /search_path.*gol sau invalid/
+    );
+    // Client trebuie eliberat chiar dacă rezolvarea schemei eșuează
+    expect(client.released).toBe(true);
+  });
+
+  it('respinge schema name with invalid characters (SQL injection)', async () => {
+    const client = makeClient({ appliedSeed: [] });
+    const pool = makePool(client);
+
+    await expect(
+      applyMigrations(pool, '/migs', { schema: 'amef"; DROP TABLE foo --' })
+    ).rejects.toThrow(/Numele schemei invalid/);
+    // Validare sync — nu trebuie să acquire connection deloc
+    expect(pool.connect).not.toHaveBeenCalled();
+  });
+
+  it('respinge schema name cu majuscule sau spații', async () => {
+    const client = makeClient({ appliedSeed: [] });
+    const pool = makePool(client);
+
+    await expect(
+      applyMigrations(pool, '/migs', { schema: 'Amef' })
+    ).rejects.toThrow(/Numele schemei invalid/);
+    await expect(
+      applyMigrations(pool, '/migs', { schema: 'amef shared' })
+    ).rejects.toThrow(/Numele schemei invalid/);
+    await expect(
+      applyMigrations(pool, '/migs', { schema: '' })
+    ).rejects.toThrow(/Numele schemei invalid/);
   });
 });
 
@@ -233,7 +329,7 @@ describe('applyMigrations — error path', () => {
     });
     const pool = makePool(client);
 
-    await expect(applyMigrations(pool, '/migs')).rejects.toThrow(
+    await expect(applyMigrations(pool, '/migs', TEST_OPTS)).rejects.toThrow(
       /Migrație eșuată "001_bad\.sql"/
     );
 
@@ -255,7 +351,7 @@ describe('applyMigrations — error path', () => {
     const client = makeClient({ appliedSeed: [], failOn: 'FAIL_ME' });
     const pool = makePool(client);
 
-    await expect(applyMigrations(pool, '/migs')).rejects.toThrow();
+    await expect(applyMigrations(pool, '/migs', TEST_OPTS)).rejects.toThrow();
 
     // 002_good.sql nu trebuie să apară în calls
     const sqls = client.calls.map((c) => c.sql);
@@ -268,7 +364,7 @@ describe('applyMigrations — error path', () => {
     const client = makeClient({ appliedSeed: [], failOn: 'FAIL_ME' });
     const pool = makePool(client);
 
-    await expect(applyMigrations(pool, '/migs')).rejects.toThrow();
+    await expect(applyMigrations(pool, '/migs', TEST_OPTS)).rejects.toThrow();
 
     const sqls = client.calls.map((c) => c.sql);
     expect(sqls.some((s) => s.includes('pg_advisory_unlock'))).toBe(true);
@@ -281,10 +377,13 @@ describe('applyMigrations — error path', () => {
     const client = makeClient({ appliedSeed: [], failOn: 'FAIL_ME' });
     const pool = makePool(client);
 
-    await expect(applyMigrations(pool, '/migs')).rejects.toThrow();
+    await expect(applyMigrations(pool, '/migs', TEST_OPTS)).rejects.toThrow();
 
     expect(migrate._deps.logger.error).toHaveBeenCalledWith(
-      expect.objectContaining({ filename: '001_bad.sql' }),
+      expect.objectContaining({
+        filename: '001_bad.sql',
+        schema: 'amef',
+      }),
       expect.stringContaining('ROLLBACK')
     );
   });
@@ -297,7 +396,7 @@ describe('applyMigrations — advisory lock', () => {
     const client = makeClient({ appliedSeed: [] });
     const pool = makePool(client);
 
-    await applyMigrations(pool, '/migs');
+    await applyMigrations(pool, '/migs', TEST_OPTS);
 
     // Găsim indicele apelului de lock
     const lockIdx = client.calls.findIndex(
@@ -319,7 +418,7 @@ describe('applyMigrations — advisory lock', () => {
     const client = makeClient({ appliedSeed: [] });
     const pool = makePool(client);
 
-    await applyMigrations(pool, '/migs');
+    await applyMigrations(pool, '/migs', TEST_OPTS);
 
     const unlockCall = client.calls.find(
       (c) =>
@@ -339,7 +438,7 @@ describe('applyMigrations — advisory lock', () => {
     });
     const pool = makePool(client);
 
-    await expect(applyMigrations(pool, '/migs')).rejects.toThrow();
+    await expect(applyMigrations(pool, '/migs', TEST_OPTS)).rejects.toThrow();
 
     const unlockCall = client.calls.find(
       (c) =>
@@ -364,7 +463,8 @@ describe('applyMigrations — advisory lock', () => {
         }
         if (
           typeof sql === 'string' &&
-          sql.includes('SELECT filename FROM schema_migrations')
+          sql.includes('SELECT filename') &&
+          sql.includes('schema_migrations')
         ) {
           return { rows: [] };
         }
@@ -376,7 +476,9 @@ describe('applyMigrations — advisory lock', () => {
     };
     const pool = makePool(client);
 
-    await expect(applyMigrations(pool, '/migs')).resolves.toBeDefined();
+    await expect(
+      applyMigrations(pool, '/migs', TEST_OPTS)
+    ).resolves.toBeDefined();
     expect(migrate._deps.logger.warn).toHaveBeenCalled();
     expect(client.released).toBe(true);
   });
@@ -394,10 +496,13 @@ describe('applyMigrations — logger', () => {
       error: vi.fn(),
     };
 
-    await applyMigrations(pool, '/migs', customLogger);
+    await applyMigrations(pool, '/migs', {
+      schema: 'amef',
+      logger: customLogger,
+    });
 
     expect(customLogger.info).toHaveBeenCalledWith(
-      { filename: '001_a.sql' },
+      { filename: '001_a.sql', schema: 'amef' },
       'Migrație aplicată'
     );
     // _deps.logger NU trebuie chemat când e override-uit

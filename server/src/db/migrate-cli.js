@@ -38,6 +38,10 @@ async function resolveTarget(args) {
       kind: 'shared',
       secretName: config.SHARED_DB_CONNECTION_SECRET_NAME,
       migrationsDir: path.join(__dirname, 'migrations', 'shared'),
+      // Schema explicit pentru `schema_migrations` — vezi „search_path
+      // race" în CLAUDE.md / Stage 2 notes. Migrațiile-utilizator pot muta
+      // search_path mid-session; tracking-ul rămâne stabil aici.
+      schema: 'amef_shared',
       logBindings: { target: 'shared' },
     };
   }
@@ -52,6 +56,7 @@ async function resolveTarget(args) {
       kind: 'tenant',
       secretName: `tenant-${slug}-db-connection`,
       migrationsDir: path.join(__dirname, 'migrations', 'tenant'),
+      schema: 'amef',
       logBindings: { target: 'tenant', slug },
     };
   }
@@ -87,9 +92,16 @@ async function main() {
   });
 
   try {
-    const result = await applyMigrations(pool, target.migrationsDir, cliLogger);
+    const result = await applyMigrations(pool, target.migrationsDir, {
+      schema: target.schema,
+      logger: cliLogger,
+    });
     cliLogger.info(
-      { applied: result.applied, skipped: result.skipped },
+      {
+        applied: result.applied,
+        skipped: result.skipped,
+        schema: target.schema,
+      },
       'Migrații finalizate'
     );
     // Output uman pe stdout pentru ergonomie CLI
