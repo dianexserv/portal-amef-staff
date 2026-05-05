@@ -1,0 +1,38 @@
+meta {
+  name: Lookup by CUI (ANAF)
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/api/v1/clients/lookup-by-cui
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+body:json {
+  {
+    "cui": "RO12345678",
+    "referenceDate": "2026-05-05"
+  }
+}
+
+docs {
+  Auto-completare ANAF V9 cu cache 24h și fallback stale când ANAF e jos.
+
+  Rate-limit: 30 cereri/oră/user (separat de rate-limit-ul global pe /api/*).
+
+  Răspuns: { cui, denumire, adresa, cod_caen, is_vat_payer, is_inactive,
+  is_split_tva, adresa_sediu, adresa_domiciliu_fiscal, nr_reg_com,
+  data_inregistrare, anaf_data, fetched_at, stale }.
+
+  Erori posibile:
+    - 400 INVALID_CUI / VALIDATION_ERROR
+    - 404 CUI_NOT_FOUND_AT_ANAF
+    - 429 ANAF_RATE_LIMIT (peste 30 cereri/oră)
+    - 503 ANAF_UNAVAILABLE / ANAF_RESPONSE_INVALID
+}

@@ -54,6 +54,7 @@ router.post('/firebase-login', async (req, res, next) => {
       email: user.email,
       tenantSlug: user.tenant_slug,
       tenantId: user.tenant_id,
+      userId: user.id,
       role: user.role,
     });
     const refresh = await _deps.authService.emitRefreshToken({
@@ -107,6 +108,7 @@ router.post('/refresh', async (req, res, next) => {
       email: user.email,
       tenantSlug: user.tenant_slug,
       tenantId: user.tenant_id,
+      userId: user.id,
       role: user.role,
     });
     // Rotație: emitem și un refresh token nou. Vechiul rămâne valid până la

@@ -1,0 +1,54 @@
+meta {
+  name: Create client
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/v1/clients
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{authToken}}
+}
+
+body:json {
+  {
+    "fiscal_code_type": "CUI",
+    "fiscal_code": "RO12345678",
+    "company_name": "Exemplu SRL",
+    "is_vat_payer": true,
+    "county": "Cluj",
+    "city": "Cluj-Napoca",
+    "street": "Str. Memorandumului",
+    "street_number": "1",
+    "address_full": "Str. Memorandumului nr. 1, Cluj-Napoca, Cluj",
+    "postal_code": "400114",
+    "phone": "+40712345678",
+    "email": "contact@exemplusrl.ro",
+    "representative_role_id": 1,
+    "representative_name": "Maria Ionescu",
+    "representative_ci_series": "KX",
+    "representative_ci_number": "654321",
+    "representative_ci_issued_by": "SPCLEP Cluj",
+    "representative_ci_issued_at": "2019-06-15",
+    "representative_county": "Cluj",
+    "representative_city": "Cluj-Napoca",
+    "representative_street": "Str. Memorandumului",
+    "representative_street_number": "1",
+    "iban": "RO49AAAA1B31007593840000",
+    "bank_name": "Banca Transilvania",
+    "notes": "Client adăugat manual din Bruno"
+  }
+}
+
+docs {
+  Creare client din UI (validare strictă: representative_* required).
+
+  Erori posibile:
+    - 400 VALIDATION_ERROR — Zod a respins payload-ul
+    - 409 FISCAL_CODE_DUPLICATE — există deja client activ cu acest fiscal_code
+    - 409 EMAIL_DUPLICATE — există deja client activ cu acest email
+}
