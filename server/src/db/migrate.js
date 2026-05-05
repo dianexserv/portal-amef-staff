@@ -124,9 +124,20 @@ async function applyMigrations(pool, migrationsDir, options = {}) {
   try {
     const schema = await resolveSchema(client, providedSchema);
 
-    // Asigurăm existența schemei ÎNAINTE de table — `CREATE SCHEMA IF NOT
-    // EXISTS` e idempotent. Necesar mai ales pentru DB-urile tenant unde
-    // prima migrație de utilizator încă nu a rulat și schema `amef` lipsește.
+    // 1) Acquire advisory lock ÎNAINTE de orice DDL. `CREATE TABLE IF NOT
+    //    EXISTS` din Postgres NU e atomic față de DDL concurent: două
+    //    aplicații care pornesc simultan pot trece amândouă de IF NOT EXISTS
+    //    și apoi una eșuează cu „duplicate key on pg_type_typname_nsp_index".
+    //    Lock-ul aici serializează și DDL-ul de bootstrap, nu doar
+    //    INSERT-urile de migrații.
+    await client.query('SELECT pg_advisory_lock($1)', [
+      MIGRATION_ADVISORY_LOCK_ID,
+    ]);
+    lockAcquired = true;
+
+    // 2) Bootstrap schema + tabela de tracking. Idempotent prin IF NOT
+    //    EXISTS, iar lock-ul de mai sus garantează că un singur client
+    //    rulează această secvență la un moment dat.
     await client.query(`CREATE SCHEMA IF NOT EXISTS "${schema}"`);
     await client.query(
       `CREATE TABLE IF NOT EXISTS "${schema}".schema_migrations (
@@ -135,13 +146,8 @@ async function applyMigrations(pool, migrationsDir, options = {}) {
        )`
     );
 
-    await client.query('SELECT pg_advisory_lock($1)', [
-      MIGRATION_ADVISORY_LOCK_ID,
-    ]);
-    lockAcquired = true;
-
-    // Re-citim fișierele aplicate DUPĂ acquisition lock — altă instanță
-    // putea aplica între timp, vrem să vedem starea curentă.
+    // 3) Citim fișierele aplicate ACUM (după lock) — vedem starea
+    //    consistentă, indiferent ce a făcut altă instanță.
     const appliedRes = await client.query(
       `SELECT filename FROM "${schema}".schema_migrations ORDER BY filename ASC`
     );
