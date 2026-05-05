@@ -412,6 +412,65 @@ module.exports = {
 - Good: `// Cache pool per tenant pentru a evita re-creare conexiuni la fiecare request`
 - Bad: `// Map cu pools` (superficial)
 
+### Testing seam pattern (`_deps` injection)
+
+Modules that depend on external resources we cannot easily replace at test time
+(GCP clients, `pg.Pool`, filesystem readers, network clients) export a mutable
+`_deps` object as the standard testing seam in this CJS project. Tests mutate
+entries on `_deps` to inject mocks; production code must not touch `_deps`
+directly except for the lazy initialisation that reads its members.
+
+**Why this pattern:** Vitest's `vi.mock` does NOT intercept CommonJS `require()`,
+and `vi.resetModules()` does not clear Node's native CJS require cache. Every
+other approach (auto-mock factories, `vi.doMock`, `vi.hoisted` + factory)
+proved either flaky or coupled to Vitest hoisting magic that does not apply to
+CJS source files. Explicit injection via `_deps` is verbose but deterministic.
+
+**Examples in the codebase:**
+- `server/src/utils/secret-manager.js` — `_deps.ClientClass` (GCP Secret
+  Manager client). Tests assign a constructor returning `{ accessSecretVersion: vi.fn() }`.
+- `server/src/db/pool.js` — `_deps.PoolClass`, `_deps.getSecret`, `_deps.logger`.
+  Tests assign a fake Pool factory and a noop logger.
+- `server/src/db/migrate.js` — `_deps.fs` (filesystem), `_deps.logger`.
+  Tests assign a fake `readdirSync` to control which migration files are visible.
+
+**Module template:**
+
+```javascript
+const realDep = require('some-package');
+const realLogger = require('../logger');
+
+// _deps object exported strictly for testing. Tests mutate _deps.client/_deps.logger
+// to inject mocks. Production code MUST NOT touch _deps directly except in lazy init.
+const _deps = {
+  client: realDep,
+  logger: realLogger,
+};
+
+async function doWork() {
+  // Production reads from _deps so test injections are picked up automatically.
+  const result = await _deps.client.fetch();
+  _deps.logger.info({ result }, 'Done');
+  return result;
+}
+
+module.exports = { doWork, _deps };
+```
+
+**Test template:**
+
+```javascript
+const mod = require('./my-module');
+
+beforeEach(() => {
+  mod._deps.client = { fetch: vi.fn().mockResolvedValue('mocked') };
+  mod._deps.logger = { info: vi.fn(), error: vi.fn() };
+});
+```
+
+Caveat: do not enumerate `_deps` keys in production code. Treat them as
+read-only references during normal execution.
+
 ---
 
 ## Database conventions
@@ -577,13 +636,13 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Stage 2 — Setup databases and migration runner (next)
-**Last completed stage:** Stage 1 — Setup project and structure (incl. testing infrastructure) (2026-05-05)
-**Next action:** Start Stage 2 — create Cloud SQL databases (`amef_shared`, `amef_shared_staging`, `amef_tenant_dianex`, `amef_tenant_dianex_staging`), users, secrets, and the migration runner.
+**Current stage:** Stage 3 — Connection pool and logger (next; pool already done in 2a, app.js wiring in 3)
+**Last completed stage:** Stage 2 — Setup databases and migration runner (2a + 2b complete, 2026-05-05)
+**Next action:** Start Stage 3 — Express app skeleton (`app.js`), pino-http middleware, basic health endpoint, error handling middleware.
 
 ### Completed stages
 - [x] Stage 1 — Setup project and structure (incl. testing infrastructure)
-- [ ] Stage 2 — Setup databases and migration runner (with tests)
+- [x] Stage 2 — Setup databases and migration runner (with tests)
 - [ ] Stage 3 — Connection pool and logger (with tests)
 - [ ] Stage 4 — Login and Tenant Resolution (with full test suite)
 - [ ] Stage 5 — Clients module with ANAF auto-completion (with full test suite)
@@ -602,14 +661,18 @@ When working on this codebase, NEVER do these things:
 > _Update after each test run._
 
 ```
-Last `pnpm test` run: 2026-05-05 — server: 1 passed (smoke.test.js), frontend: 0 (passWithNoTests)
-Last `pnpm test:coverage` run: 2026-05-05 — both workspaces produced reports, no thresholds violated
-Coverage (target / actual):
-  - services:   80% / no files yet (threshold skipped)
-  - middleware: 100% / no files yet (threshold skipped)
-  - routes:     70% / no files yet (threshold skipped)
-  - frontend components: 70% / no files yet (threshold skipped)
-  - frontend hooks: 70% / no files yet (threshold skipped)
+Last `pnpm test` run: 2026-05-05 (Stage 2 complete) — server: 91 passed + 5 integration skipped (no local Postgres),
+  frontend: 0 (passWithNoTests)
+Last `pnpm test:coverage` run: 2026-05-05 — server stats per file:
+  - src/config.js:           100 / 93.33 / 100 / 100   (uncovered: branch in error path)
+  - src/logger.js:           100 / 100 / 100 / 100
+  - src/db/migrate.js:       100 / 100 / 100 / 100
+  - src/db/pool.js:          99.35 / 100 / 100 / 99.35 (uncovered: log line in cleanup catch)
+  - src/utils/secret-manager.js: 100 / 100 / 100 / 100
+  - src/db/migrate-cli.js:   excluded from coverage (CLI entry point, not unit-tested)
+  - services / middleware / routes: no files yet (thresholds skipped)
+Integration tests against real Postgres run automatically in CI (postgres:18 service container).
+Locally, `pnpm test:integration` requires `TEST_DB_CONNECTION_STRING` to be set.
 ```
 
 ### How to run tests
@@ -657,6 +720,36 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
 - CI: `.github/workflows/ci.yml` — Node 20, pnpm 9, lint + test:run + test:coverage; coverage artifact uploaded
 - **Lint este stub** (`echo "skipped"`) în ambele workspace-uri până când adăugăm config eslint flat — la nevoie în Stage 3+
 - Praguri pe globs (`src/services/**`, etc.) sunt sărite când nu există fișiere care match-uiesc — vor intra automat în vigoare odată ce se adaugă cod în acele foldere
+
+**Sub-stage 2b — Migration runner + SQL migrations + CI Postgres service (2026-05-05, code complete, NOT committed):**
+- `server/src/db/migrate.js` — `applyMigrations(pool, dir, logger)`, `listAppliedMigrations`, `listMigrationFiles`. `_deps.fs` injectabil pentru teste.
+- **Strategie de migrare** (vezi headerul `migrate.js` pentru detalii):
+  1. Bootstrap idempotent al tabelei `schema_migrations` (CREATE IF NOT EXISTS).
+  2. `pg_advisory_lock(MIGRATION_ADVISORY_LOCK_ID = 9182734)` pe o singură conexiune dedicată — Cloud Run poate scala simultan și două instanțe ar putea încerca să aplice migrațiile la pornire; lock-ul Postgres pe DB serializează aplicarea.
+  3. Per fișier ne-aplicat: `BEGIN` → execută SQL → `INSERT` în `schema_migrations` → `COMMIT`. Pe orice eroare: `ROLLBACK` + throw cu filename inclus în mesaj. NU se continuă la următorul fișier după eșec.
+  4. `pg_advisory_unlock` în `finally` — chiar și pe eșec, lock-ul e eliberat ca alte instanțe să poată reîncerca după fix.
+- `server/src/db/migrate-cli.js` — wrapper CLI subțire, citește connection string din Secret Manager, apelează `applyMigrations`. Folosit local cu `pnpm migrate:shared` / `pnpm migrate:tenant <slug>`. Exclus din coverage (entry point fără logică de testat unitar).
+- Migrații SQL:
+  - `migrations/shared/001_init_shared.sql` — `amef_shared.tenants`, `amef_shared.tenant_users`, `amef_shared.audit_log_global`, indici și constrângeri (slug regex, role enum, status enum). Toate au `created_at`/`updated_at`/`deleted_at` per convențiile din CLAUDE.md.
+  - `migrations/tenant/001_init_tenant_schema.sql` — DOAR `CREATE SCHEMA IF NOT EXISTS amef`. Tabelele tenant vin în Stage 5+.
+- 18 unit tests pentru `migrate.js` (mock pool + fs prin `_deps`); 5 integration tests pe Postgres real (skipate local fără `TEST_DB_CONNECTION_STRING`, rulate în CI cu service container).
+- `.github/workflows/ci.yml` — service container `postgres:18`, healthcheck `pg_isready`, env `TEST_DB_CONNECTION_STRING` injectat la step-urile `test:integration` și `test:coverage`.
+- `server/package.json` și root `package.json`: scripturile `migrate:shared`/`migrate:tenant` apelează acum `migrate-cli.js`; `migrate:all` eliminat (nu reflectă D-per-tenant — fiecare DB tenant cere slug-ul lui).
+- **Stage 2: search_path setat via connection-string options atât în integration tests cât și în producție (`pool.js`)** — abordarea inițială cu `pool.on('connect', SET search_path)` rulează SET asincron, fără await, iar pg-pool nu așteaptă listener-ele. În testul de integrare CI s-a manifestat ca race condition (schema_migrations creat în schema greșită cross-runs), dar și în producție rămânea o suprafață fragilă (retries de conexiune, timeouts de protocol). Fix aplicat consistent: connection string-ul include `?options=-c+search_path=<schema>,public`, pe care Postgres îl aplică ATOMIC la handshake — orice query pe acel client vede deja search_path-ul corect, garantat de protocol. Beneficii: defense-in-depth, atomic, mai puțin cod (handler `on('connect')` eliminat din ambele pool-uri tenant + shared). Helper-ul `withSearchPath(connectionString, schema)` face URL transform-ul cu `URL.searchParams`.
+- **Stage 2: `schema_migrations` e creat cu schema EXPLICITĂ pasată la runtime, nu prin search_path** — chiar și cu search_path setat corect la handshake, migrațiile-utilizator pot conține `SET search_path TO ...` (cum face de fapt `001_init_shared.sql`), iar acea schimbare persistă pentru restul sesiunii. Asta însemna că un `INSERT INTO schema_migrations` care urma migrației putea ateriza într-o schema diferită de cea în care fusese creată tabela — inconsistențe cross-runs ce manifestau ca teste de idempotency rupte intermitent în CI. Fix: `applyMigrations(pool, dir, { schema: 'amef_shared' })` — toate query-urile pe `schema_migrations` referă schema explicit ca `"<schema>".schema_migrations`. Numele schemei e sanitizat regex `[a-z0-9_]+` (interpolare în identificator nu poate fi parametrizată în pg). Default-ul (când `schema` lipsește) citește prima schema din `current_schemas(false)` — fallback util doar pentru smoke-tests.
+
+**Sub-stage 2a — Config / Logger / Secret Manager / Pool (2026-05-05, code complete, NOT committed):**
+- 4 module noi + tests collocated:
+  - `server/src/config.js` + `config.test.js` — Zod schema cu preprocess pentru `''→default`, factory `loadConfig(env)` exportat alături de configul inghețat
+  - `server/src/logger.js` + `logger.test.js` — Pino + `buildPinoOptions(cfg)` (testabil pur), `createChildLogger(bindings)`, transport `pino-pretty` activat doar pe `NODE_ENV=development`
+  - `server/src/utils/secret-manager.js` + `secret-manager.test.js` — wrapper @google-cloud/secret-manager cu cache TTL 5 min, `ValidationError` (cu `.code`), `clearCache()` resetează și clientul
+  - `server/src/db/pool.js` + `pool.test.js` — `Map` de pool-uri per tenant (`max:10`), shared pool (`max:5`), handler `connect` pentru `SET search_path TO amef[_shared], public`, `closeAllPools`, cleanup interval 30 min cu `unref()`
+- **Lecție de testare în CJS:** `vi.mock` NU interceptează `require()` în CommonJS, iar `vi.resetModules()` nu curăță cache-ul native Node CJS. Soluții aplicate consistent în Stage 2a:
+  1. **Test seam `_deps`** — modulele care depind de I/O (`secret-manager.js`, `pool.js`) exportă un obiect `_deps` mutabil cu `ClientClass` / `PoolClass` / `getSecret` / `logger`. Testele rescriu intrările pentru a injecta mock-uri. Producția nu atinge `_deps` decât pentru a citi clasa la prima instanțiere.
+  2. **Factory exportate** — `config.loadConfig(env)` și `logger.buildPinoOptions(cfg)` permit testarea cu input-uri custom fără a depinde de re-execuția modulului.
+  3. **Setup env la nivel de fișier** — fiecare `.test.js` apelează `vi.stubEnv` la top level înainte de primul `require('./module')` ca încărcarea inițială a configului să nu arunce.
+- Coverage: 99.75% lines / 98.46% branches / 100% functions pe toate cele 4 module noi (țintă CLAUDE.md: 80%+).
+- **NU am modificat** `vitest.config.js`, `package.json` scripts, sau CI workflow — toate rămân pentru Sub-stage 2b.
 
 ---
 

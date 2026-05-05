@@ -19,8 +19,7 @@
     "lint": "pnpm -r lint",
     "lint:fix": "pnpm -r lint:fix",
     "migrate:shared": "pnpm --filter @portal-amef-staff/server migrate:shared",
-    "migrate:tenant": "pnpm --filter @portal-amef-staff/server migrate:tenant",
-    "migrate:all": "pnpm --filter @portal-amef-staff/server migrate:all"
+    "migrate:tenant": "pnpm --filter @portal-amef-staff/server migrate:tenant"
   },
   "devDependencies": {
     "husky": "^9.1.6"

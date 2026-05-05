@@ -17,9 +17,8 @@
     "test:integration": "vitest run tests/integration",
     "lint": "echo \"server lint: skipped (no eslint config yet — added in later stage)\"",
     "lint:fix": "echo \"server lint:fix: skipped (no eslint config yet)\"",
-    "migrate:shared": "node src/db/migrate.js shared",
-    "migrate:tenant": "node src/db/migrate.js tenant",
-    "migrate:all": "node src/db/migrate.js all"
+    "migrate:shared": "node src/db/migrate-cli.js shared",
+    "migrate:tenant": "node src/db/migrate-cli.js tenant"
   },
   "dependencies": {
     "@google-cloud/secret-manager": "^5.6.0",
