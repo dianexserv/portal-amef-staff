@@ -1,7 +1,7 @@
-# CLAUDE.md — portal-amef-staff
+# CLAUDE.md — portal-amef-staff (v2)
 
 > **Acest fișier este citit de Claude Code CLI la fiecare sesiune.**
-> Conține contextul curent al aplicației, convențiile de cod și starea curentă a construcției.
+> Conține contextul curent al aplicației, convențiile de cod, regulile de testare și starea curentă a construcției.
 > Locație: `C:\Aplicatii-Dianex\portal-amef\portal-amef-staff\CLAUDE.md`
 
 ---
@@ -34,7 +34,7 @@
 - Zod for validation
 - Pino + pino-http for logging (NO `console.log`)
 - Helmet, cors, express-rate-limit
-- Vitest + Supertest + Bruno for testing
+- **Vitest** + **Supertest** + **Bruno** for testing
 - pnpm package manager
 
 ### Frontend
@@ -42,6 +42,7 @@
 - Tailwind CSS
 - **JavaScript pure** (NO TypeScript)
 - Functional components + Hooks
+- **Vitest** + **React Testing Library** for testing
 
 ### Auth
 - Firebase Identity Platform (Google SSO + email/password + 2FA TOTP mandatory)
@@ -59,8 +60,236 @@
 ### Deploy
 - Cloud Run europe-west1
 - Two environments: `staging` and `production`
-- CI: GitHub Actions
+- CI: GitHub Actions with **mandatory tests gating**
 - CD: Cloud Build with triggers on tags
+
+---
+
+## TESTING RULES (MANDATORY)
+
+**A function/endpoint is NOT considered done until it has tests.**
+
+### Required tests per component
+
+| Component | Required test | Tool |
+|-----------|---------------|------|
+| Service function (`*-service.js`) | Unit test | Vitest |
+| API endpoint (route + controller) | Integration test | Supertest |
+| Zod schema | Unit test (valid + invalid input) | Vitest |
+| Middleware (auth, requireRole, etc.) | Unit test | Vitest |
+| React component | Render + interaction test | Vitest + React Testing Library |
+| API endpoint (manual exploration) | Bruno request | Bruno |
+
+### Coverage targets (enforced via vitest.config.js)
+
+| Code type | Minimum coverage |
+|-----------|-----------------|
+| Services (business logic) | **80%+** |
+| Controllers/routes | **70%+** |
+| Middleware (auth, validate) | **100%** |
+| Frontend components (critical) | **70%+** |
+
+### Mandatory workflow per function
+
+```
+1. Write the code
+2. Write the tests (Vitest unit + Supertest integration)
+3. Save Bruno request (if endpoint)
+4. Run `pnpm test` → all green
+5. Run `pnpm test:coverage` → targets met
+6. Commit with conventional message
+```
+
+**NEVER commit without green tests. CI in GitHub Actions blocks merge if tests fail or coverage drops below targets.**
+
+### Test file naming
+
+- Unit tests: `<filename>.test.js`
+  - Example: `client-service.test.js`, `auth-middleware.test.js`
+- Integration tests: `<route-name>.integration.test.js`
+  - Example: `clients-route.integration.test.js`, `auth-route.integration.test.js`
+- Tests live next to the code they test (collocated):
+  ```
+  src/services/
+  ├── client-service.js
+  ├── client-service.test.js
+  ├── invoice-service.js
+  └── invoice-service.test.js
+  ```
+
+### Vitest test pattern (CommonJS)
+
+```javascript
+// File: services/client-service.test.js
+
+const { describe, it, expect, beforeEach, vi } = require('vitest');
+const { createClient } = require('./client-service');
+const { getTenantPool } = require('../db/pool');
+
+// Mock external dependencies for test isolation
+vi.mock('../db/pool', () => ({
+  getTenantPool: vi.fn(),
+}));
+
+describe('client-service', () => {
+  describe('createClient', () => {
+    let mockPool;
+
+    beforeEach(() => {
+      // Reset mocks before each test
+      mockPool = { query: vi.fn() };
+      getTenantPool.mockResolvedValue(mockPool);
+    });
+
+    it('creează un client cu date valide', async () => {
+      // Arrange
+      const tenantSlug = 'dianex';
+      const data = { cui: 'RO12345678', company_name: 'Test SRL' };
+      mockPool.query.mockResolvedValue({
+        rows: [{ id: 1, ...data }],
+      });
+
+      // Act
+      const result = await createClient(tenantSlug, data);
+
+      // Assert
+      expect(result.id).toBe(1);
+      expect(mockPool.query).toHaveBeenCalledTimes(1);
+    });
+
+    it('respinge CUI invalid (sub 2 caractere)', async () => {
+      const data = { cui: 'X', company_name: 'Test SRL' };
+      await expect(createClient('dianex', data)).rejects.toThrow();
+    });
+
+    it('respinge company_name gol', async () => {
+      const data = { cui: 'RO12345678', company_name: '' };
+      await expect(createClient('dianex', data)).rejects.toThrow();
+    });
+  });
+});
+```
+
+### Supertest integration test pattern
+
+```javascript
+// File: routes/clients.integration.test.js
+
+const { describe, it, expect, beforeAll } = require('vitest');
+const request = require('supertest');
+const { createApp } = require('../app');
+const { generateTestJwt } = require('../tests/fixtures/auth');
+
+describe('POST /api/v1/clients', () => {
+  let app;
+  let validJwt;
+
+  beforeAll(async () => {
+    app = createApp();
+    validJwt = await generateTestJwt({
+      tenant_slug: 'dianex_test',
+      role: 'tenant_admin',
+    });
+  });
+
+  it('creează client cu auth valid și date corecte', async () => {
+    const response = await request(app)
+      .post('/api/v1/clients')
+      .set('Authorization', `Bearer ${validJwt}`)
+      .send({ cui: 'RO12345678', company_name: 'Test SRL' });
+
+    expect(response.status).toBe(201);
+    expect(response.body.success).toBe(true);
+  });
+
+  it('respinge request fără auth → 401', async () => {
+    const response = await request(app)
+      .post('/api/v1/clients')
+      .send({ cui: 'RO12345678', company_name: 'Test SRL' });
+
+    expect(response.status).toBe(401);
+  });
+
+  it('respinge JWT invalid → 401', async () => {
+    const response = await request(app)
+      .post('/api/v1/clients')
+      .set('Authorization', 'Bearer invalid-jwt')
+      .send({ cui: 'RO12345678', company_name: 'Test SRL' });
+
+    expect(response.status).toBe(401);
+  });
+
+  it('respinge date invalide → 400', async () => {
+    const response = await request(app)
+      .post('/api/v1/clients')
+      .set('Authorization', `Bearer ${validJwt}`)
+      .send({ cui: 'X', company_name: '' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.success).toBe(false);
+  });
+});
+```
+
+### Vitest config with coverage gating
+
+```javascript
+// File: server/vitest.config.js
+
+module.exports = {
+  test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'json', 'lcov'],
+      thresholds: {
+        // Per-folder thresholds (PER CLAUDE.md)
+        'src/services/**': {
+          lines: 80,
+          functions: 80,
+          branches: 70,
+          statements: 80,
+        },
+        'src/middleware/**': {
+          lines: 100,
+          functions: 100,
+          branches: 100,
+          statements: 100,
+        },
+        'src/routes/**': {
+          lines: 70,
+          functions: 70,
+          branches: 60,
+          statements: 70,
+        },
+      },
+    },
+  },
+};
+```
+
+### CI gating in GitHub Actions
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install
+      - run: pnpm lint
+      - run: pnpm test                   # FAIL = block merge
+      - run: pnpm test:coverage          # Coverage below threshold = block merge
+```
 
 ---
 
@@ -69,39 +298,49 @@
 ```
 portal-amef-staff/
 ├── server/
-│   └── src/
-│       ├── routes/               ← only routing
-│       ├── controllers/          ← validation, calls services
-│       ├── services/             ← business logic, calls DB
-│       ├── db/
-│       │   ├── pool.js           ← pool cache per tenant + SET search_path
-│       │   ├── migrate.js        ← migration runner
-│       │   ├── migrations/
-│       │   │   ├── shared/       ← migrations for amef_shared DB
-│       │   │   └── tenant/       ← migrations for amef_tenant_* DBs
-│       │   └── setup/            ← initial setup SQL scripts
-│       ├── middleware/           ← auth, validate, error-handler, require-role
-│       ├── utils/                ← secret-manager, helpers
-│       ├── logger.js             ← Pino setup
-│       ├── config.js             ← env vars validated with Zod
-│       └── app.js                ← Express app entry
+│   ├── src/
+│   │   ├── routes/
+│   │   ├── controllers/
+│   │   ├── services/             ← code + .test.js collocated
+│   │   ├── db/
+│   │   │   ├── pool.js
+│   │   │   ├── pool.test.js
+│   │   │   ├── migrate.js
+│   │   │   ├── migrate.test.js
+│   │   │   ├── migrations/
+│   │   │   │   ├── shared/
+│   │   │   │   └── tenant/
+│   │   │   └── setup/
+│   │   ├── middleware/           ← code + .test.js collocated
+│   │   ├── utils/
+│   │   ├── logger.js
+│   │   ├── config.js
+│   │   └── app.js
+│   ├── tests/
+│   │   ├── integration/          ← integration tests (Supertest)
+│   │   └── fixtures/             ← test helpers, mock data, JWT generators
+│   └── vitest.config.js
 ├── frontend/
 │   ├── src/
-│   │   ├── components/           ← reusable UI components
-│   │   ├── pages/                ← route pages
-│   │   ├── hooks/                ← custom React hooks
-│   │   └── utils/                ← helpers, API client
-│   └── ...
-├── docs/                         ← additional docs (ADRs, diagrams)
-├── tests/
-│   ├── unit/                     ← Vitest unit tests
-│   └── integration/              ← Supertest integration tests
-├── bruno/                        ← Bruno API collection
-├── Dockerfile                    ← multi-stage build
-├── .env.example                  ← all env vars with dummy values
+│   │   ├── components/           ← .jsx + .test.jsx collocated
+│   │   ├── pages/
+│   │   ├── hooks/
+│   │   └── utils/
+│   ├── tests/
+│   └── vitest.config.js
+├── bruno/
+│   └── portal-amef-staff/        ← Bruno API collection
+├── docs/
+├── Dockerfile
+├── .env.example
 ├── .gitignore
 ├── .dockerignore
-├── package.json                  ← workspace root
+├── .husky/
+│   └── pre-commit                ← runs `pnpm test && pnpm lint`
+├── .github/
+│   └── workflows/
+│       └── ci.yml                ← CI with test gating
+├── package.json
 ├── pnpm-workspace.yaml
 ├── README.md
 └── CLAUDE.md                     ← this file
@@ -113,6 +352,7 @@ portal-amef-staff/
 
 ### Filenames
 - **kebab-case** mandatory: `client-service.js`, `auth-middleware.js`, `pool.js`
+- **Test files:** `.test.js` (unit), `.integration.test.js` (integration)
 - NO camelCase: `clientService.js` ❌
 - NO PascalCase: `ClientService.js` ❌
 
@@ -124,8 +364,6 @@ portal-amef-staff/
 ### Module pattern (CommonJS)
 
 ```javascript
-// File: services/client-service.js
-
 const { z } = require('zod');
 const { getTenantPool } = require('../db/pool');
 const logger = require('../logger');
@@ -220,9 +458,20 @@ pnpm dev
 cd frontend
 pnpm dev
 
-# Run tests
+# Run all tests
 pnpm test
+
+# Run tests in watch mode
+pnpm test:watch
+
+# Run tests with coverage
 pnpm test:coverage
+
+# Run a specific test file
+pnpm test client-service
+
+# Run only integration tests
+pnpm test:integration
 
 # Lint
 pnpm lint
@@ -248,7 +497,7 @@ pnpm migrate:all                 # all DBs
 
 ### Deploy
 ```bash
-# Deploy staging (auto on push to develop)
+# Deploy staging (auto on push to develop, after CI passes)
 git push origin develop
 
 # Deploy production (auto on tag)
@@ -295,6 +544,9 @@ GCS_BUCKET_PREFIX=portal-amef-docs
 # Email
 SENDGRID_API_KEY_SECRET_NAME=sendgrid-api-key-{env}
 EMAIL_FROM_ADDRESS=portal@dianex.ro
+
+# Test environment
+TEST_DB_CONNECTION_STRING=postgresql://...  # for integration tests against staging
 ```
 
 ---
@@ -315,6 +567,9 @@ When working on this codebase, NEVER do these things:
 10. **NEVER** skip Zod validation on user input
 11. **NEVER** deploy to production without going through staging first
 12. **NEVER** put real Dianex client data in staging DB (use seed data or anonymized subset)
+13. **NEVER** write a function/endpoint without writing its tests immediately after
+14. **NEVER** commit if `pnpm test` fails or coverage drops below targets
+15. **NEVER** skip the Bruno request for new endpoints
 
 ---
 
@@ -323,43 +578,93 @@ When working on this codebase, NEVER do these things:
 > **This section is updated after each completed stage.**
 
 **Current stage:** Stage 2 — Setup databases and migration runner (next)
-**Last completed stage:** Stage 1 — Setup project and structure (2026-05-05)
+**Last completed stage:** Stage 1 — Setup project and structure (incl. testing infrastructure) (2026-05-05)
 **Next action:** Start Stage 2 — create Cloud SQL databases (`amef_shared`, `amef_shared_staging`, `amef_tenant_dianex`, `amef_tenant_dianex_staging`), users, secrets, and the migration runner.
 
 ### Completed stages
-- [x] Stage 1 — Setup project and structure
-- [ ] Stage 2 — Setup databases and migration runner
-- [ ] Stage 3 — Connection pool and logger
-- [ ] Stage 4 — Login and Tenant Resolution
-- [ ] Stage 5 — Clients module with ANAF auto-completion
-- [ ] Stage 6 — Integration with erp-sync
-- [ ] Stage 7 — Articles + Invoicing module
-- [ ] Stage 8 — Cash registers + Technical dossier
-- [ ] Stage 9 — Integration with anaf-signer
-- [ ] Stage 10 — Fiscal flow module (C801 + F4102)
-- [ ] Stage 11 — Documents + DOCX generator
-- [ ] Stage 12 — Audit log + Dashboard Configurare Tenant
-- [ ] Stage 13 — Drive migration (Dianex)
-- [ ] Stage 14 — End-to-end testing + Bug fixing
-- [ ] Stage 15 — Production deploy + Monitoring
+- [x] Stage 1 — Setup project and structure (incl. testing infrastructure)
+- [ ] Stage 2 — Setup databases and migration runner (with tests)
+- [ ] Stage 3 — Connection pool and logger (with tests)
+- [ ] Stage 4 — Login and Tenant Resolution (with full test suite)
+- [ ] Stage 5 — Clients module with ANAF auto-completion (with full test suite)
+- [ ] Stage 6 — Integration with erp-sync (with tests)
+- [ ] Stage 7 — Articles + Invoicing module (with full test suite)
+- [ ] Stage 8 — Cash registers + Technical dossier (with tests)
+- [ ] Stage 9 — Integration with anaf-signer (with tests)
+- [ ] Stage 10 — Fiscal flow module C801 + F4102 (with tests + real critical test)
+- [ ] Stage 11 — Documents + DOCX generator (with tests)
+- [ ] Stage 12 — Audit log + Dashboard Configurare Tenant (with full test suite)
+- [ ] Stage 13 — Drive migration Dianex (with tests + real migration)
+- [ ] Stage 14 — End-to-end testing + Bug fixing (regression tests)
+- [ ] Stage 15 — Production deploy + Monitoring (CI gating)
+
+### Current test status
+> _Update after each test run._
+
+```
+Last `pnpm test` run: 2026-05-05 — server: 1 passed (smoke.test.js), frontend: 0 (passWithNoTests)
+Last `pnpm test:coverage` run: 2026-05-05 — both workspaces produced reports, no thresholds violated
+Coverage (target / actual):
+  - services:   80% / no files yet (threshold skipped)
+  - middleware: 100% / no files yet (threshold skipped)
+  - routes:     70% / no files yet (threshold skipped)
+  - frontend components: 70% / no files yet (threshold skipped)
+  - frontend hooks: 70% / no files yet (threshold skipped)
+```
+
+### How to run tests
+
+```bash
+# All workspaces, run mode (no watch) — folosit în CI și pre-commit
+pnpm test                    # = pnpm -r test:run
+pnpm -r test:run
+
+# Watch mode local
+pnpm test:watch              # = pnpm -r test:watch
+
+# Coverage cu praguri din vitest.config.js
+pnpm test:coverage           # = pnpm -r test:coverage
+
+# Doar server / doar frontend
+pnpm --filter @portal-amef-staff/server test:run
+pnpm --filter @portal-amef-staff/frontend test:run
+
+# Doar integration tests pe server
+pnpm --filter @portal-amef-staff/server test:integration
+
+# Un singur fișier
+pnpm --filter @portal-amef-staff/server test:run -- src/services/client-service.test.js
+```
+
+CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fiecare push pe `main`/`develop` și pe PR. Husky `.husky/pre-commit` rulează aceleași comenzi local — commit-ul este blocat dacă oricare eșuează.
 
 ### Notes from build
 
 **Stage 1 (2026-05-05):**
-- pnpm workspace cu 2 pachete: `server` (`@portal-amef-staff/server`) și `frontend` (`@portal-amef-staff/frontend`)
-- Backend: Express, pg, Zod, Pino + pino-http, Helmet, cors, express-rate-limit, jsonwebtoken, firebase-admin, @google-cloud/secret-manager, dotenv. Dev: vitest + @vitest/coverage-v8, supertest, eslint, prettier, pino-pretty
+- pnpm workspace cu 2 pachete: `server` (`@portal-amef-staff/server`) și `frontend` (`@portal-amef-staff/frontend`); `packageManager: pnpm@10.33.0` în root pentru CI determinist
+- Backend: Express, pg, Zod, Pino + pino-http, Helmet, cors, express-rate-limit, jsonwebtoken, firebase-admin, @google-cloud/secret-manager, dotenv. Dev: vitest 2.1 + @vitest/coverage-v8, supertest, eslint, prettier, pino-pretty
 - Frontend: React 18 + Vite 5 + Tailwind 3 (postcss + autoprefixer). Config Vite cu proxy `/api` → `http://localhost:3001` pentru dev fără CORS
 - Build scripts approved în `pnpm.onlyBuiltDependencies` din root `package.json`: `esbuild`, `protobufjs` (necesare pentru Vite și firebase-admin)
-- Folosim `.gitkeep` pentru a păstra în git folderele goale ale structurii (`server/src/routes`, `controllers`, `services`, `middleware`, `db/{migrations/{shared,tenant},setup}`, `utils`; `frontend/src/{components,pages,hooks,utils}`; `tests/{unit,integration}`; `bruno`; `docs`)
-- `app.js`, `config.js`, `logger.js` NU sunt create încă — apar la Stage 3 conform planului
+- `.gitkeep` pentru a păstra în git folderele goale ale structurii
+- `app.js`, `config.js`, `logger.js` apar la Stage 3 conform planului
+
+**Stage 1 — Testing infrastructure (2026-05-05):**
+- `server/vitest.config.js` (CommonJS), `frontend/vitest.config.js` (ESM), praguri per glob conform tabelului din secțiunea Testing Rules
+- **Important:** Vitest 2.x este pur ESM și NU poate fi importat via `require('vitest')` dintr-un modul CJS. Soluție aplicată: `globals: true` în vitest.config.js → fișierele `.test.js` folosesc `describe/it/expect/vi` direct ca globale, fără import. Codul aplicației rămâne CommonJS curat. Pattern-ul exemplu din CLAUDE.md (`const { describe, it } = require('vitest')`) trebuie evitat — folosiți globalele.
+- Frontend: jsdom + @testing-library/jest-dom + @testing-library/react instalate; setup file la `frontend/tests/setup.js`; `passWithNoTests: true` până când avem componente reale
+- Smoke test: `server/src/smoke.test.js` — verifică doar că Vitest rulează
+- Husky 9 instalat (`prepare: husky` în root package.json); `.husky/pre-commit` rulează `pnpm -r test:run` + `pnpm -r lint`
+- CI: `.github/workflows/ci.yml` — Node 20, pnpm 9, lint + test:run + test:coverage; coverage artifact uploaded
+- **Lint este stub** (`echo "skipped"`) în ambele workspace-uri până când adăugăm config eslint flat — la nevoie în Stage 3+
+- Praguri pe globs (`src/services/**`, etc.) sunt sărite când nu există fișiere care match-uiesc — vor intra automat în vigoare odată ce se adaugă cod în acele foldere
 
 ---
 
 ## Reference documents
 
 For detailed context, see:
-- **`portal-amef-overview.md`** (in Knowledge Base of Claude project) — full architecture, decisions D1-D20, terminology
-- **`portal-amef-staff-plan.md`** (in Knowledge Base) — detailed plan of all 15 stages
+- **`portal-amef-overview.md`** (in Knowledge Base of Claude project) — full architecture, decisions D1-D20, terminology, **Section 4 Testing Philosophy**
+- **`portal-amef-staff-plan.md`** (in Knowledge Base) — detailed plan of all 15 stages with extended Definition of Done
 
 If a decision is needed that isn't documented, **stop and ask Madalin** before proceeding.
 
@@ -370,3 +675,4 @@ If a decision is needed that isn't documented, **stop and ask Madalin** before p
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2026-05-05 | Initial CLAUDE.md post Stage 0 (Analysis) |
+| 2.0 | 2026-05-05 | Added Testing Rules (mandatory) section + CI gating + workflow per function |

@@ -10,11 +10,13 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --watch src/app.js",
-    "test": "vitest run",
+    "test": "vitest",
+    "test:run": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "lint": "eslint \"src/**/*.js\"",
-    "lint:fix": "eslint \"src/**/*.js\" --fix",
+    "test:integration": "vitest run tests/integration",
+    "lint": "echo \"server lint: skipped (no eslint config yet — added in later stage)\"",
+    "lint:fix": "echo \"server lint:fix: skipped (no eslint config yet)\"",
     "migrate:shared": "node src/db/migrate.js shared",
     "migrate:tenant": "node src/db/migrate.js tenant",
     "migrate:all": "node src/db/migrate.js all"

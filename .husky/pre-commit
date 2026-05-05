@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+# Hook pre-commit — blochează commit-ul dacă testele sau lint-ul eșuează.
+# Conform regulilor din CLAUDE.md (Testing Rules): nu commit fără teste verzi.
+
+set -e
+
+echo "→ Running tests (pnpm -r test:run)..."
+pnpm -r test:run
+
+echo "→ Running lint (pnpm -r lint)..."
+pnpm -r lint
+
+echo "✓ pre-commit checks passed"
