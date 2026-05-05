@@ -518,7 +518,80 @@ să poată ținti staging și de pe o mașină cu `NODE_ENV=production`.
 - FK explicit with `ON DELETE CASCADE` or `SET NULL`
 - Indexes on WHERE/JOIN/FK columns
 - Direct SQL via `pg`, no ORM
-- Migrations include `SET search_path TO amef, public;` at start
+- Migrations: NU pun `SET search_path TO ...` la început; folosesc nume
+  fully-qualified (`amef.core_clients`, `amef_shared.tenants`). Runner-ul
+  (`migrate.js`) tracking-uiește `schema_migrations` cu schema explicită,
+  iar FQN-urile sunt imune la migrațiile-utilizator care ar muta
+  search_path-ul mid-session.
+
+---
+## Tenant DB schema overview
+
+Schema `amef` din DB-urile de tenant (`amef_tenant_<slug>` în production,
+`amef_tenant_<slug>_staging` în staging). Tabelele se adaugă pe stage-uri;
+mai jos e starea curentă.
+
+### Tabele existente
+
+| Tabela                            | Rol | Stage adăugat |
+|-----------------------------------|-----|---------------|
+| `amef.core_representative_roles`  | Lookup pentru rolul reprezentantului legal al unui client (administrator, asociat, PFA, titular CMI, etc.) — populată cu 6 seed-uri la migrare. Editabilă din Dashboard Configurare Tenant (Stage 12). | 5a (mig 001) |
+| `amef.core_clients`               | Clienții tenantului (SRL/PFA/ÎI cu CUI sau persoane fizice cu CNP). Vezi structura detaliată mai jos. | 5a (mig 001 + 002) |
+| `amef.schema_migrations`          | Tracking automat al migrațiilor aplicate (creată de `migrate.js`, NU de o migrație SQL). | 2 |
+
+### `core_clients` — detalii structură
+
+**Identificare fiscală:**
+- `fiscal_code_type` ∈ {`CUI`, `CNP`} (CHECK constraint).
+- `fiscal_code` — NOT NULL. Toți clienții au identificare fiscală.
+- UNIQUE pe `(fiscal_code, deleted_at)` cu `NULLS NOT DISTINCT` — un fiscal_code activ unic per tenant.
+
+**Adresă companie** (toate NOT NULL, populate din ANAF la creare):
+- `county`, `city`, `street`, `street_number`. Plus `address_full` (text liber), `address_extra`, `postal_code` opționale.
+
+**Contact:**
+- `phone`, `email` — ambele opționale individual.
+- CHECK `phone_or_email_required`: cel puțin unul dintre `phone` și `email` trebuie să fie NOT NULL.
+- `email` UNIQUE per tenant (partial unique index: `WHERE email IS NOT NULL AND deleted_at IS NULL`) — rezervă unicitatea pentru clienți activi cu email, permite multipli clienți fără email să coexiste. Folosit ca login pentru portalul Client (Faza B).
+- `notes` (TEXT) pentru contacte adiționale și observații staff.
+
+**Reprezentant legal** (toate nullable după migrația 002 — datele legacy din Drive pot fi incomplete; service layer-ul Stage 5b enforce-ază prezența la creare via UI cu Zod):
+- `representative_name`, `representative_role_id` (FK → `core_representative_roles`).
+- CI: `representative_ci_series`, `representative_ci_number`, `representative_ci_issued_by`, `representative_ci_issued_at`.
+- Adresă reprezentant: `representative_county`, `representative_city`, `representative_street`, `representative_street_number`, `representative_address_full`, `representative_address_extra`, `representative_postal_code`.
+
+**Banking:** `iban`, `bank_name` (ambele opționale).
+
+**Status ANAF:**
+- `is_vat_payer` (boolean, default false).
+- `anaf_verified` (boolean, default false), `anaf_verified_at`, `anaf_status`.
+- `anaf_data` (JSONB) — cache complet al răspunsului ANAF webservice. Două motivații: (a) graceful fallback când ANAF API e down, avem date locale + timestamp ultima verificare; (b) cron zilnic de re-verificare compară JSON-ul nou cu cel cached și flag-uiește schimbări.
+
+**Audit:** `created_at`, `updated_at`, `deleted_at` (soft-delete), `created_by_id`.
+
+### Indexuri pe `core_clients`
+
+- `core_clients_pkey` — PK btree pe `id`.
+- `fiscal_code_unique_active` — UNIQUE btree pe `(fiscal_code, deleted_at) NULLS NOT DISTINCT`.
+- `idx_core_clients_email_unique_active` — UNIQUE btree pe `email`, partial `WHERE email IS NOT NULL AND deleted_at IS NULL`.
+- `idx_core_clients_email` — btree non-unique pe `email`, partial `WHERE email IS NOT NULL` (lookup cross-tenant audit, inclusiv soft-deleted).
+- `idx_core_clients_fiscal_code` — btree non-unique pe `fiscal_code` (lookup direct).
+- `idx_core_clients_company_name_trgm` — **GIN trigram** pe `company_name` cu `gin_trgm_ops` (search ILIKE `'%fragment%'` în UI). Necesită extension `pg_trgm`.
+- `idx_core_clients_anaf_pending` — btree pe `anaf_verified`, partial `WHERE anaf_verified = false` (cron de re-verificare scanează doar nepreverificați).
+- `idx_core_clients_recent_active` — btree pe `(created_at DESC)`, partial `WHERE deleted_at IS NULL` (lista paginată "ultimii clienți").
+
+### Extensions PostgreSQL
+
+- `pg_trgm` 1.6+ — necesar pentru GIN trigram pe `company_name`. Activat în migrația 002.
+
+### Migrații aplicate
+
+| # | Filename | Descriere | Aplicat staging | Aplicat production |
+|---|----------|-----------|-----------------|---------------------|
+| 001 | `001_init_tenant_schema.sql` | Schema inițială: `core_representative_roles` (cu seed) + `core_clients` (companie NOT NULL, reprezentant NOT NULL la momentul scrierii) + indexuri inițiale + UNIQUE constraints. | 2026-05-05 | 2026-05-05 |
+| 002 | `002_relax_representative_and_add_anaf_cache.sql` | Forward fix post-divergență: DROP NOT NULL pe 9 coloane `representative_*` (Drive legacy), ADD `anaf_data` JSONB, ADD CHECK `phone_or_email_required`, înlocuire btree `idx_core_clients_company_name` cu GIN trigram, înlocuire `idx_core_clients_active` (predicat tautologic) cu `idx_core_clients_recent_active` (utility query "ultimii clienți"). Pattern `NOT VALID + VALIDATE` pentru CHECK. | 2026-05-05 | 2026-05-05 |
+
+Tabelele care vin în stage-urile următoare (articole, facturi, plăți, case de marcat, dosar tehnic, declarații fiscale, audit log) se adaugă prin migrații `003+`.
 
 ---
 
@@ -752,16 +825,24 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Stage 4 Part B — Frontend auth (Google SSO popup + JWT storage + protected routes). Code & tests complete, pending review.
-**Last completed stage:** Stage 4 Part A — Backend auth (merged on main).
-**Next action:** Start Stage 5 — Modulul Clienți (CRUD + ANAF auto-completion).
+**Current stage:** Sub-stage 5a — DB schema for Clients module. Tenant migrations 001 (`core_representative_roles` + `core_clients` + seed) și 002 (forward fix: DROP NOT NULL pe representative_*, `anaf_data` JSONB, CHECK `phone_or_email_required`, GIN trigram pe `company_name`, înlocuire index `active`) aplicate cu succes pe **staging și production**. Schema finală validată via `\d amef.core_clients` pe ambele environments. Pending: PR + squash merge pe `main`, apoi sub-stage 5b.
+
+**Last completed stage:** Stage 4 — Auth (Part A backend + Part B frontend, merged on main).
+
+**Next action:** Open PR pentru `feat/stage-5-clients-anaf` (3 fișiere: 001 + 002 + CLAUDE.md), merge, apoi pornesc sub-stage 5b — Service layer pentru Clienți (`client-service.js` cu CRUD + Zod schema, `anaf-lookup-service.js` cu cache 24h și fallback).
 
 ### Completed stages
+
 - [x] Stage 1 — Setup project and structure (incl. testing infrastructure)
 - [x] Stage 2 — Setup databases and migration runner (with tests)
 - [x] Stage 3 — Express app bootstrap (merged)
-- [~] Stage 4 — Login and Tenant Resolution (Part A backend merged; Part B frontend code complete, pending review)
-- [ ] Stage 5 — Clients module with ANAF auto-completion (with full test suite)
+- [x] Stage 4 — Login and Tenant Resolution (Part A backend + Part B frontend, merged)
+- [~] Stage 5 — Clients module with ANAF auto-completion
+  - [~] 5a — DB schema (migrations 001 + 002 applied to staging + production; pending PR/merge)
+  - [ ] 5b — Service layer (`client-service.js` CRUD + Zod schema)
+  - [ ] 5c — ANAF lookup service (`anaf-lookup-service.js` with 24h cache + fallback)
+  - [ ] 5d — Routes `/api/v1/clients` + integration tests + Bruno collection
+  - [ ] 5e — Frontend (listă + formular + auto-completare ANAF)
 - [ ] Stage 6 — Integration with erp-sync (with tests)
 - [ ] Stage 7 — Articles + Invoicing module (with full test suite)
 - [ ] Stage 8 — Cash registers + Technical dossier (with tests)
@@ -860,6 +941,30 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
   inactiv / șters / neînregistrat în tenant_users). Restul flow-ului
   neschimbat — frontend continuă să afișeze 403 pentru cazurile reale de
   ForbiddenError (cont neautorizat).
+
+**Sub-stage 5a — DB schema Modulul Clienți (2026-05-05, applied to staging + production, pending PR/merge):**
+- `migrations/tenant/001_init_tenant_schema.sql` — înlocuit placeholder Stage 2 (`CREATE SCHEMA amef`) cu schema reală: `core_representative_roles` (lookup cu 6 seed-uri: Administrator, Asociat unic, PFA - titular, ÎI - titular, Director General, Reprezentant împuternicit) + `core_clients` (37 coloane: identificare fiscală CUI/CNP, adresă companie completă, contact, reprezentant legal complet cu CI și adresă, banking, status ANAF, notes, audit). UNIQUE constraints: `(fiscal_code, deleted_at) NULLS NOT DISTINCT` (un fiscal_code activ unic per tenant). Partial unique index: `email WHERE email IS NOT NULL AND deleted_at IS NULL` — permite multipli clienți fără email să coexiste, dar enforce unicitate pe cei cu email (prep pentru login portal Client Faza B). Indexuri inițiale: btree pe `fiscal_code`, `email` (partial), `company_name` (btree simplu — corectat în 002), `(deleted_at) WHERE deleted_at IS NULL` (corectat în 002), `anaf_verified WHERE = false`. FK `representative_role_id → core_representative_roles(id)`.
+- `migrations/tenant/002_relax_representative_and_add_anaf_cache.sql` — forward fix după aplicarea 001 pe staging și descoperirea divergențelor:
+  - **9× ALTER COLUMN ... DROP NOT NULL** pe coloanele `representative_*` (`representative_name`, `representative_role_id`, `representative_ci_*`, `representative_county/city/street/street_number`). Decizia 2c: companie NOT NULL (date din ANAF garantate), reprezentant nullable (Drive legacy migration Stage 13 va avea date incomplete). Service layer-ul (5b) enforce-ază prezența la creare via UI cu Zod.
+  - **ADD COLUMN `anaf_data JSONB`** — cache complet răspuns ANAF webservice. Două use-cases: graceful fallback când ANAF API e down + cron zilnic de re-verificare comparând JSON-uri.
+  - **ADD CONSTRAINT `phone_or_email_required` CHECK (phone IS NOT NULL OR email IS NOT NULL)** cu pattern `NOT VALID` + `VALIDATE CONSTRAINT` separat (best practice production cu date — evită lock ACCESS EXCLUSIVE pe table scan). Pe staging tabela e goală, pe production aplicat înainte de orice INSERT, ambele paths fără overhead.
+  - **CREATE EXTENSION pg_trgm** + înlocuire btree `idx_core_clients_company_name` cu GIN `(company_name gin_trgm_ops)` — btree-ul susține doar lookup exact și prefix; pentru search ILIKE `'%fragment%'` din UI e necesar trigram. Trade-off: ~10-20% mai lent la INSERT, dar tabela e read-heavy.
+  - **DROP `idx_core_clients_active`** (btree pe `deleted_at WHERE deleted_at IS NULL` — predicat tautologic, planner nu-l folosește) **+ CREATE `idx_core_clients_recent_active`** pe `(created_at DESC) WHERE deleted_at IS NULL` (susține "lista paginată ultimii clienți" + ORDER BY DESC).
+- **Decizii arhitecturale Stage 5a:**
+  - **Tipuri entități:** SRL/PFA/ÎI cu CUI + persoane fizice cu CNP (`fiscal_code_type` CHECK).
+  - **ANAF down:** fallback graceful + cron zilnic + buton manual re-verificare (cache în `anaf_data`).
+  - **CUI duplicat:** 409 + link spre client existent (UNIQUE constraint enforce-ează).
+  - **Adresa:** `address_full` (text liber editabil) + 4 câmpuri structurate (county/city/street/street_number) + `address_extra` + `postal_code`.
+  - **Contacte:** 1 phone + 1 email + `notes` (TEXT pentru contacte adiționale).
+  - **Email UNIQUE per tenant:** doar pentru clienți activi cu email (partial index).
+  - **Telefon SAU email obligatoriu:** CHECK constraint la nivel DB (defense-in-depth) + Zod la nivel service.
+  - **`representative_role_id`:** tabel separat (`core_representative_roles`) editabil din Dashboard Configurare Tenant Stage 12.
+- **Aplicare migrații:**
+  - Staging: tracking 001 (din Stage 2 placeholder) DELETE-uit manual → re-apply 001 + apply 002 → schema finală 3 tabele (`core_clients`, `core_representative_roles`, `schema_migrations`), 6 roluri seed, 2 entries în tracking.
+  - Production: identic — DELETE 001 placeholder → apply 001 + 002 within same `migrate-cli.js` run (`Applied: 2 | Skipped: 0`).
+  - Validare schemă: `\d amef.core_clients` confirmă 37 coloane, 8 indexuri, 2 CHECK constraints, 1 FK.
+- **Lecție migrațiilor:** runner-ul tracking-uiește **filename**, nu hash conținut. Modificarea unui fișier deja aplicat NU declanșează re-rulare. Pe production NICIODATĂ nu modificăm un fișier de migrație deja aplicat — corecturile vin întotdeauna ca migrații noi cu numere incrementale (forward-only). Pe staging am făcut excepție DOAR pentru 001 (era placeholder gol din Stage 2) — pattern care nu se repetă pe production cu date reale.
+- **Lecție DB schema:** UNIQUE NULLS NOT DISTINCT collapse-uiește toate NULL-urile într-o singură "valoare egală" — util când NULL e o stare ilegală (ex: `fiscal_code` care nu poate fi NULL legal). Pentru cazuri unde NULL e legitim (ex: `email` la clienți persoană fizică) folosim partial unique index `WHERE column IS NOT NULL` care permite multipli NULL să coexiste.
 
 **Stage 4 Part B — Frontend auth (Google SSO popup + JWT storage + protected routes) (2026-05-05, code complete, NOT committed):**
 - Dependențe noi (frontend): `firebase` (Web SDK v12), `react-router-dom` (v7), `axios` (v1). `pnpm install` rulează clean (un warning de build-script pentru `@firebase/util` — irrelevant pentru runtime).
