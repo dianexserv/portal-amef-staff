@@ -1,0 +1,27 @@
+{
+  "name": "portal-amef-staff",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portal AMEF — modulul staff (backend Express + frontend React)",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "dev:server": "pnpm --filter @portal-amef-staff/server dev",
+    "dev:frontend": "pnpm --filter @portal-amef-staff/frontend dev",
+    "test": "pnpm -r test",
+    "test:coverage": "pnpm -r test:coverage",
+    "lint": "pnpm -r lint",
+    "lint:fix": "pnpm -r lint:fix",
+    "migrate:shared": "pnpm --filter @portal-amef-staff/server migrate:shared",
+    "migrate:tenant": "pnpm --filter @portal-amef-staff/server migrate:tenant",
+    "migrate:all": "pnpm --filter @portal-amef-staff/server migrate:all"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "protobufjs"
+    ]
+  }
+}

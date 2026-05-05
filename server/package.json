@@ -1,0 +1,44 @@
+{
+  "name": "@portal-amef-staff/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend Express pentru Portal AMEF Staff",
+  "main": "src/app.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint \"src/**/*.js\"",
+    "lint:fix": "eslint \"src/**/*.js\" --fix",
+    "migrate:shared": "node src/db/migrate.js shared",
+    "migrate:tenant": "node src/db/migrate.js tenant",
+    "migrate:all": "node src/db/migrate.js all"
+  },
+  "dependencies": {
+    "@google-cloud/secret-manager": "^5.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "firebase-admin": "^12.5.0",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.0",
+    "pino": "^9.4.0",
+    "pino-http": "^10.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.1",
+    "eslint": "^9.11.1",
+    "pino-pretty": "^11.2.2",
+    "prettier": "^3.3.3",
+    "supertest": "^7.0.0",
+    "vitest": "^2.1.1"
+  }
+}
