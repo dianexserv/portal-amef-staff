@@ -825,11 +825,11 @@ When working on this codebase, NEVER do these things:
 
 > **This section is updated after each completed stage.**
 
-**Current stage:** Sub-stage 5d — Clients routes + Bruno + integration tests. 6 endpoint-uri (`GET /clients`, `GET /clients/:id`, `POST /clients`, `PUT /clients/:id`, `DELETE /clients/:id` admin-only, `POST /clients/lookup-by-cui`) + middleware `anaf-rate-limit` (30/oră/user) + 17 integration tests pe Postgres real (skip-uite local) + 6 Bruno requests + JWT claim `user_id` adăugat. Coverage `clients.js` 97.96/87.5/100/97.96, `anaf-rate-limit.js` 100%. Code complete, NOT committed.
+**Current stage:** Sub-stage 5e — Frontend Modulul Clienți. 4 rute (`/clients`, `/clients/new`, `/clients/:id`, `/clients/:id/edit`), 3 hooks (useClients/useClient/useAnafLookup), 6 componente (3 pagini + ClientForm + AnafLookupBadge + ClientStaleBanner), utils (clients-api + clients-validation Zod simplificat). 47 teste noi frontend (95 total). Coverage `src/pages/**` 95.35/84.53/86.95, `src/components/**` 97.13/73.4/93.33, `src/hooks/**` 96.61/85.71/100, `src/utils/**` 96.11/88.31/89.28. Code complete, NOT committed.
 
-**Last completed stage:** Sub-stage 5c — ANAF lookup service (`anaf-lookup-service.js` cu retry + cache 24h + stale fallback; `judete-romania.js` helper; 35 teste; merged pe main).
+**Last completed stage:** Sub-stage 5d — Clients routes + Bruno + integration tests (6 endpoint-uri + middleware ANAF rate-limit + 17 integration tests + 6 Bruno requests; merged pe main).
 
-**Next action:** Sub-stage 5e — Frontend modul Clienți (pagina listă, formular create/edit cu auto-completare ANAF la blur pe câmpul CUI, modal soft-delete restorable din UI doar pentru tenant_admin).
+**Next action:** Stage 6 — Integration with erp-sync (after merge Stage 5).
 
 ### Completed stages
 
@@ -842,7 +842,7 @@ When working on this codebase, NEVER do these things:
   - [x] 5b — Service layer (`client-service.js` 9 funcții + 3 scheme Zod + PG error mapping; 54 unit tests; merged pe main)
   - [x] 5c — ANAF lookup service (`anaf-lookup-service.js` cu retry + cache 24h + stale fallback; `judete-romania.js` helper; 35 teste; merged pe main)
   - [~] 5d — Routes `/api/v1/clients` (6 endpoint-uri) + ANAF rate-limiter + integration tests + Bruno collection (code complete, NOT committed)
-  - [ ] 5e — Frontend (listă + formular + auto-completare ANAF)
+  - [~] 5e — Frontend (4 rute + 3 hooks + ClientForm + ClientsListPage + ClientDetailsPage + 47 teste; code complete, NOT committed)
 - [ ] Stage 6 — Integration with erp-sync (with tests)
 - [ ] Stage 7 — Articles + Invoicing module (with full test suite)
 - [ ] Stage 8 — Cash registers + Technical dossier (with tests)
@@ -858,8 +858,8 @@ When working on this codebase, NEVER do these things:
 > _Update after each test run._
 
 ```
-Last `pnpm test` run: 2026-05-05 (Stage 4 Part B complete) — server: 244 passed + 20 integration skipped
-  (no local Postgres), frontend: 48 passed
+Last `pnpm test` run: 2026-05-06 (Sub-stage 5e complete) — server: 371 passed + 36 integration skipped
+  (no local Postgres), frontend: 95 passed (was 48 — net +47 noi în 5e)
 Last `pnpm test:coverage` run: 2026-05-05 — server stats per file (stmt/branch/func/lines):
   - src/app.js:               100 / 100 / 100 / 100
   - src/config.js:            100 / 93.33 / 100 / 100
@@ -941,6 +941,53 @@ CI rulează `pnpm -r lint`, `pnpm -r test:run`, `pnpm -r test:coverage` la fieca
   inactiv / șters / neînregistrat în tenant_users). Restul flow-ului
   neschimbat — frontend continuă să afișeze 403 pentru cazurile reale de
   ForbiddenError (cont neautorizat).
+
+**Sub-stage 5e — Frontend Modulul Clienți (2026-05-06, code complete, NOT committed):**
+- **Rute noi în `App.jsx`** (decizia 1a — separate routes per action, nu modal/single SPA route):
+  - `/clients` → `ClientsListPage`
+  - `/clients/new` → `ClientFormPage mode="create"`
+  - `/clients/:id` → `ClientDetailsPage`
+  - `/clients/:id/edit` → `ClientFormPage mode="edit"`
+  Toate wrap-uite în `<ProtectedRoute>` (Stage 4). Catch-all `*` rămâne neschimbat.
+- **Hooks (3 noi în `src/hooks/`):**
+  - `useClients({ limit, offset, search, fiscalCodeType, anafVerified })` — list paginat. AbortController + serializare filtre via `JSON.stringify` ca dependency-key (un obiect nou la fiecare render ar declanșa refetch infinit). La schimbare filtre abort-ăm request-ul în zbor — request-ul vechi venind după cel nou ar suprascrie state-ul. Întoarce `{ data, loading, error, refetch }`.
+  - `useClient(id)` — single client. Pattern identic + dacă `id` e null/undefined NU face fetch (folosit la mode='create' al ClientFormPage).
+  - `useAnafLookup()` — manual trigger only (decizia 3b — buton, NU pe blur). Întoarce `{ lookup, reset, loading, result, error }`. NU fetch automat la mount; lookup() apelează `/lookup-by-cui` și setează result + propagă erorile prin throw.
+- **Componente (3 noi în `src/components/`):**
+  - `AnafLookupBadge` — badge cu 4 stări (verified/stale/never/error). Pragul de stale = 30 zile peste `anaf_verified_at`. Tailwind colored dots + text.
+  - `ClientStaleBanner` — banner galben (decizia 4a) afișat când `lookup` întoarce `stale: true`. Dismissible (X local state — nu persistă).
+  - `ClientForm` — form-ul propriu-zis, ~470 linii. 5 secțiuni `<fieldset>` (Identificare fiscală / Date companie / Contact / Reprezentant legal / Banking). În mode='edit' fiscal_code_type și fiscal_code sunt read-only (DB nu permite update). Buton „Verifică ANAF" lângă fiscal_code (vizibil doar pe CUI, NU pe CNP) declanșează auto-completare company_name + adresă + flag is_vat_payer; pe stale=true randează ClientStaleBanner la top. Submit: `safeParse` Zod, mesaje inline per câmp via `zodErrorsToFieldMap`.
+- **Pagini (3 noi în `src/pages/`):**
+  - `ClientsListPage` — tabel paginat cu filtre (search ILIKE pe denumire, fiscalCodeType, anafVerified). PAGE_SIZE = 20. Click pe rând → navigate la detalii; butoanele Edit/Șterge per rând (Șterge doar pentru `tenant_admin`, decizia 4b). Empty state, loading state, error state cu retry.
+  - `ClientFormPage` — wrapper care delegă la ClientForm. În edit mode fetchează clientul prin useClient și hidratează formul. La submit success: `navigate('/clients/:id', { replace: true })`. Erorile backend (409 FISCAL_CODE_DUPLICATE etc.) afișate ca formError top-of-form (decizia: NU per câmp pentru că DB nu spune cu siguranță care câmp a creat conflictul).
+  - `ClientDetailsPage` — read-only view cu tab-uri. Tab-ul „General" listează toate câmpurile în 5 secțiuni mirror cu form-ul; tab-urile „Parc case" (Stage 8) și „Documente" (Stage 11) sunt placeholder-uri.
+- **Utils (3 noi în `src/utils/`):**
+  - `clients-api.js` — wrapper-uri thin peste `api-client.js` (`get`/`post`/`put`/`del`): 6 funcții (`listClients`, `getClientById`, `createClient`, `updateClient`, `deleteClient`, `lookupCui`). `buildQueryString` omite undefined/null/'' dar PĂSTRAEZĂ boolean false (filtru valid „neverificați"). Toate acceptă `signal` opțional pentru cancellation.
+  - `clients-validation.js` (decizia 5b) — Zod schemas frontend simplificat. Backend rămâne autoritate finală (service-ul 5b face validare strictă cu PG error mapping). Frontend dublează DOAR câmpurile + regex-uri identice cu cele din `client-service.js` (CUI/CNP/IBAN/date) ca să prindă greșeli evidente fără round-trip. `CreateClientFormSchema` strict + `UpdateClientFormSchema = .omit({ fiscal_code_type, fiscal_code }).partial()` (immutabile post-creare). Helper `zodErrorsToFieldMap` + `BACKEND_ERROR_MESSAGES` map (8 coduri backend → mesaje user-friendly).
+  - `representative-roles.js` — hardcoded array cu 6 valori (oglindă cu seed-ul migrației 001). TODO Stage 12: înlocuit cu fetch dinamic la `GET /api/v1/admin/representative-roles` când endpoint-ul va exista.
+- **Decizii aplicate**: 1a (separate routes), 2b (custom hook + AbortController, NU TanStack Query), 3b (manual ANAF button, NU pe blur), 4a (yellow stale banner), 4b (Șterge doar pentru tenant_admin), 5b (separate frontend Zod simplificat).
+- **Dependența nouă: `zod@^3.25.76`** (frontend) — necesară pentru clients-validation. Versiune identică cu cea din pnpm store (folosită deja de server). Singura dependență nouă; `react-hook-form`, `TanStack Query`, `@hookform/resolvers/zod` NU au fost adăugate (decizia 5b — `safeParse` direct cu controlled inputs e suficient pentru un form de această dimensiune).
+- **Test counts (47 noi frontend)**:
+  - `src/utils/clients-api.test.js` — 10 tests (query string building, get/post/put/del wrappers, lookup body, error propagation).
+  - `src/utils/api-client.test.js` — 17 tests (NESCHIMBATE, Stage 4).
+  - `src/hooks/useClients.test.js` — 7 tests (initial state, success, error, refetch on filter change, refetch() function, unmount abort, abort vs success race).
+  - `src/hooks/useAnafLookup.test.js` — 5 tests (idle, success, stale=true, error 404, reset).
+  - `src/components/ClientForm.test.jsx` — 6 tests (5 sections, phone XOR email, ANAF lookup call, ANAF auto-fill, ANAF stale banner, Anulează).
+  - `src/pages/ClientsListPage.test.jsx` — 9 tests (title + button, loading, empty, table render, search refetch, filter selects, row click, admin delete, tenant_user fără Șterge).
+  - `src/pages/ClientFormPage.test.jsx` — 5 tests (create empty, create submit success, Zod inline error, 409 backend error, edit pre-fill + readonly).
+  - `src/pages/ClientDetailsPage.test.jsx` — 5 tests (loading, general tab data, Parc case tab, Documente tab, error + Înapoi la listă).
+  - Total frontend: 95 (de la 48 înainte de 5e — net +47).
+- **Coverage frontend (toate țintele 70%+ atinse):**
+  - `src/components/`: 97.13/73.4/93.33/97.13 (AnafLookupBadge 100/62.5, ClientForm 96.9/75.67, ClientStaleBanner 95.12/33.33, ProtectedRoute 100/100).
+  - `src/hooks/`: 96.61/85.71/100/96.61 (useAnafLookup 100, useClient 89.28, useClients 100).
+  - `src/pages/`: 95.35/84.53/86.95/95.35 (ClientDetailsPage 99.28, ClientFormPage 88.33, ClientsListPage 91.48 funcs/80%, HomePage 100, LoginPage 100).
+  - `src/utils/`: 96.11/88.31/89.28/96.11 (api-client 100/94.59, clients-api 100/100, clients-validation 91.83/71.42, representative-roles 100/66.66).
+- **Hardcoded representative_roles (TODO Stage 12)**: 6 valori în `representative-roles.js` — Administrator, Asociat unic, PFA - titular, ÎI - titular, Director General, Reprezentant împuternicit. Exact aceleași seed-uri din migrația `001_init_tenant_schema.sql`. Stage 12 va înlocui cu fetch dinamic la `GET /api/v1/admin/representative-roles`.
+- **Lecții**:
+  - **AbortController în React StrictMode**: dependency-key serializat (`JSON.stringify(filters)`) PREVINE refetch-uri infinite când caller-ul construiește un obiect nou de filtre la fiecare render. Alternative (useDeepCompareEffect) sunt overkill pentru filtre flat.
+  - **Testing Library labels cu asterisk**: când randăm `<span>Label<span> *</span></span>`, textul normalizat în label devine `Label *` (cu spațiu înainte de asterisk). Regex-ul `/^Label$/i` NU match-uie; trebuie `/^Label \*$/i` sau folosit `getByRole('textbox', { name: ... })`.
+  - **`del()` din api-client NU acceptă body** — doar `(url, config)`. Dacă viitor un endpoint DELETE va cere body (rar, dar posibil), va trebui adăugat third arg. Pentru moment soft-delete-ul nu trimite body.
+  - **Decizia mode prop vs URL parsing**: `ClientFormPage` primește `mode` ca prop din `App.jsx` în loc să-l deducă din URL (`useMatch` sau `pathname.endsWith('/edit')`). Mai explicit și permite re-utilizare pentru rute cu schemă diferită (ex: `/clients/:id/duplicate` în viitor).
 
 **Sub-stage 5d — Clients routes + Bruno + integration tests (2026-05-06, code complete, NOT committed):**
 - `server/src/routes/clients.js` (~250 linii) — 6 endpoint-uri sub `/api/v1/clients`:
